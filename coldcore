@@ -1,0 +1,1828 @@
+#!/usr/bin/env python3
+"""
+TODO
+
+- [ ] implement config
+- [ ] xpub storage
+- [ ] wizard
+- [ ] disable logging in ui command, log to file
+- [ ] implement --json, --csv
+- [ ] implement command-on-monitor
+
+To document:
+
+- [ ] config
+
+
+Security assumptions:
+
+- xpub is stored in Core unencrypted
+
+"""
+
+import logging
+import re
+import typing as t
+import sys
+import base64
+import datetime
+import subprocess
+import time
+import textwrap
+import io
+from pathlib import Path
+from typing import Optional as Op
+from dataclasses import dataclass, field
+from configparser import ConfigParser
+from decimal import Decimal
+
+
+
+"""
+clii
+
+The easiest damned argparse wrapper there ever was.
+
+
+Copyright 2020 James O'Beirne
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+import sys
+import argparse
+import functools
+import inspect
+import typing as t
+import os
+import logging
+from textwrap import dedent
+
+
+logger = logging.getLogger("clii")
+if os.environ.get("CLII_DEBUG"):
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(logging.StreamHandler())
+
+
+class Arg:
+    def __init__(
+        self,
+        name_or_flags: t.Union[str, t.Sequence[str]],
+        type: object = str,
+        help: str = "",
+        default: object = inspect.Parameter.empty,
+        is_kwarg: bool = False,
+        is_vararg: bool = False,
+        dest: t.Optional[str] = None,
+    ):
+        names: t.List[str] = (
+            [name_or_flags] if isinstance(name_or_flags, str) else list(name_or_flags)
+        )
+
+        # Store original parameter name unmangled (e.g. no '-' for '_' sub).
+        self.dest = dest or names[0]
+
+        if is_kwarg:
+            names = [n.replace("_", "-") for n in names]
+
+        self.name = names[0]
+        self.all_names = list(names)
+        self.type = type
+        self.default = default
+        self.is_kwarg = is_kwarg
+        self.is_vararg = is_vararg
+        self.help = help
+
+    @classmethod
+    def from_parameter(cls, param: inspect.Parameter, help: str = "") -> "Arg":
+        type = param.annotation
+        arg = None
+
+        def is_kwarg(p):
+            return p.default != inspect.Parameter.empty
+
+        if isinstance(type, cls):
+            # User already specified an Arg, just use that.
+            arg = type
+            arg.is_kwarg = is_kwarg(param)
+            arg.default = param.default
+            arg.update_name(param.name)
+            arg.dest = param.name
+            return arg
+        return cls(
+            param.name,
+            type=param.annotation,
+            default=param.default,
+            help=help,
+            is_kwarg=is_kwarg(param),
+            is_vararg=(param.kind == inspect.Parameter.VAR_POSITIONAL),
+            dest=param.name,
+        )
+
+    @classmethod
+    def from_func(cls, func: t.Callable) -> t.Sequence["Arg"]:
+        # Ignore `**kwargs`; it can't be sensibly interpreted into flags
+        params = [
+            p for p in _get_func_params(func) if p.kind != inspect.Parameter.VAR_KEYWORD
+        ]
+
+        helps_from_doc = _get_helps_from_func(func, [p.name for p in params])
+
+        return tuple(
+            cls.from_parameter(param, helps_from_doc.get(param.name, ""))
+            for param in _get_func_params(func)
+            if
+            # Ignore `**kwargs`; it can't be sensibly interpreted into flags
+            param.kind != inspect.Parameter.VAR_KEYWORD
+        )
+
+    def add_to_parser(self, parser: argparse.ArgumentParser):
+        kwargs = dict(default=self.default, type=self.type, help=self.arg_help)
+
+        if self.is_kwarg:
+            kwargs["dest"] = self.dest
+        elif self.is_vararg:
+            kwargs["nargs"] = "*"
+            kwargs.pop("default", "")
+            if kwargs.get("type") == inspect.Parameter.empty:
+                kwargs.pop("type")
+
+        if self.type == bool or any(self.default is i for i in [True, False]):
+            kwargs["action"] = "store_false" if self.default else "store_true"
+            kwargs.pop("type", "")
+
+        logger.debug(f"Attaching argument: {self.names} -> {kwargs}")
+        parser.add_argument(*self.names, **kwargs)  # type: ignore
+
+    def update_name(self, name: str):
+        if name not in self.all_names:
+            self.all_names.insert(0, name)
+        else:
+            assert self.all_names[0] == name
+
+        self.name = name
+
+    @property
+    def names(self) -> t.Tuple[str, ...]:
+        if not self.is_kwarg:
+            return (self.name,)
+
+        assert all(i.startswith("-") for i in self.all_names[1:])
+        assert self.name == self.all_names[0]
+        return (f"--{self.name}",) + tuple(self.all_names[1:])
+
+    @property
+    def arg_help(self) -> str:
+        out = self.help or ""
+        if self.default is not inspect.Parameter.empty:
+            if out:
+                out += ". "
+            out += f"default: {self.default}"
+        return out
+
+
+def _get_func_params(func) -> t.List[inspect.Parameter]:
+    return list(inspect.signature(func).parameters.values())
+
+
+def _get_helps_from_func(func, param_names) -> t.Dict[str, str]:
+    if not func.__doc__:
+        return {}
+
+    helps_from_doc = {}
+
+    for line in dedent(func.__doc__).splitlines():
+        for p in param_names:
+            patt = f"  {p}:"
+
+            if patt in line:
+                helps_from_doc[p] = line.split(patt)[-1].strip()
+
+    return helps_from_doc
+
+
+class App:
+    def __init__(self, *args, **kwargs):
+        self.parser = argparse.ArgumentParser(*args, **kwargs)
+        self.subparsers = None
+
+    def add_arg(self, *args, **kwargs):
+        self.parser.add_argument(*args, **kwargs)
+        return self.parser
+
+    add_argument = add_arg
+
+    def main(self, fnc):
+        self.parser.set_defaults(func=fnc)
+
+        for arg in Arg.from_func(fnc):
+            arg.add_to_parser(self.parser)
+
+        if not self.parser.description:
+            self.parser.description = fnc.__doc__
+
+        @functools.wraps(fnc)
+        def wrapper(*args, **kwargs):
+            return fnc(*args, **kwargs)
+
+        return wrapper
+
+    def cmd(self, fnc) -> t.Callable:
+        if not self.subparsers:
+            self.subparsers = self.parser.add_subparsers()
+
+        sub = self.subparsers.add_parser(
+            fnc.__name__.replace("_", "-"), description=fnc.__doc__
+        )
+        logger.debug("Added subparser: %s", sub)
+
+        for arg in Arg.from_func(fnc):
+            arg.add_to_parser(sub)
+            logger.debug("  Adding argument: %s", arg)
+
+        sub.set_defaults(func=fnc)
+
+        @functools.wraps(fnc)
+        def wrapper(*args, **kwargs):
+            return fnc(*args, **kwargs)
+
+        return wrapper
+
+    def parse_for_run(self) -> t.Tuple[t.Callable, t.Tuple[t.List, t.Dict]]:
+        self.args = self.parser.parse_args()
+        args = vars(self.args)
+        logger.debug("Parsed args: %s", args)
+        fnc = args.pop("func", None)
+
+        if not fnc:
+            self.parser.print_help()
+            sys.exit(1)
+
+        func_args = []
+        func_kwargs = {}
+        building_kwargs = False
+
+        # Only pull in those parameters which `fnc` accepts, since the
+        # global parser may have supplied more.
+        for p in _get_func_params(fnc):
+            if p.kind == inspect.Parameter.KEYWORD_ONLY:
+                building_kwargs = True
+
+            if building_kwargs:
+                func_kwargs[p.name] = args[p.name]
+            elif p.kind == inspect.Parameter.VAR_POSITIONAL:
+                func_args.extend(args[p.name])
+            else:
+                func_args.append(args[p.name])
+
+        return (fnc, (func_args, func_kwargs))
+
+    def run(self):
+        (fnc, (func_args, func_kwargs)) = self.parse_for_run()
+
+        return fnc(*func_args, **func_kwargs)
+
+
+
+
+# Copyright (C) 2007 Jan-Klaas Kollhof
+# Copyright (C) 2011-2018 The python-bitcoinlib developers
+# Copyright (C) 2020 James O'Beirne
+#
+# This section is part of python-bitcoinlib.
+#
+# It is subject to the license terms in the LICENSE file found in the top-level
+# directory of the python-bitcoinlib distribution.
+#
+# No part of python-bitcoinlib, including this section, may be copied, modified,
+# propagated, or distributed except according to the terms contained in the
+# LICENSE file.
+
+import logging
+import os
+import base64
+import http.client as httplib
+import json
+import platform
+import urllib.parse as urlparse
+import re
+from typing import IO, Optional as Op
+from decimal import Decimal
+
+DEFAULT_USER_AGENT = "AuthServiceProxy/0.1"
+DEFAULT_HTTP_TIMEOUT = 30
+
+
+logger = logging.getLogger("rpc")
+logger.setLevel(logging.DEBUG)
+# logger.addHandler(logging.StreamHandler())
+
+
+class JSONRPCError(Exception):
+    """JSON-RPC protocol error base class
+    Subclasses of this class also exist for specific types of errors; the set
+    of all subclasses is by no means complete.
+    """
+
+    def __init__(self, rpc_error):
+        super(JSONRPCError, self).__init__(
+            "msg: %r  code: %r" % (rpc_error["message"], rpc_error["code"])
+        )
+        self.error = rpc_error
+
+
+class BaseProxy(object):
+    """Base JSON-RPC proxy class. Contains only private methods; do not use
+    directly."""
+
+    def __init__(
+        self,
+        service_url=None,
+        service_port=None,
+        wallet_name=None,
+        btc_conf_file=None,
+        net_name=None,
+        timeout=DEFAULT_HTTP_TIMEOUT,
+        connection=None,
+        debug_stream: Op[IO] = None,
+    ):
+
+        # Create a dummy connection early on so if __init__() fails prior to
+        # __conn being created __del__() can detect the condition and handle it
+        # correctly.
+        self.__conn = None
+        self.debug_stream = debug_stream
+        authpair = None
+        net_name = net_name or "mainnet"
+        self.net_name = net_name
+
+        if service_url is None:
+            # Figure out the path to the bitcoin.conf file
+            if btc_conf_file is None:
+                if platform.system() == "Darwin":
+                    btc_conf_file = os.path.expanduser(
+                        "~/Library/Application Support/Bitcoin/"
+                    )
+                elif platform.system() == "Windows":
+                    btc_conf_file = os.path.join(os.environ["APPDATA"], "Bitcoin")
+                else:
+                    btc_conf_file = os.path.expanduser("~/.bitcoin")
+                btc_conf_file = os.path.join(btc_conf_file, "bitcoin.conf")
+
+            # Bitcoin Core accepts empty rpcuser, not specified in btc_conf_file
+            conf = {"rpcuser": ""}
+
+            # Extract contents of bitcoin.conf to build service_url
+            try:
+                with open(btc_conf_file, "r") as fd:
+                    for line in fd.readlines():
+                        if "#" in line:
+                            line = line[: line.index("#")]
+                        if "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        conf[k.strip()] = v.strip()
+
+            # Treat a missing bitcoin.conf as though it were empty
+            except FileNotFoundError:
+                pass
+
+            if service_port is None:
+                service_port = {
+                    "mainnet": 8332,
+                }.get(net_name, 18332)
+
+            conf["rpcport"] = int(conf.get("rpcport", service_port))
+            conf["rpchost"] = conf.get("rpcconnect", "localhost")
+
+            service_url = "%s://%s:%d" % ("http", conf["rpchost"], conf["rpcport"])
+
+            cookie_dir = conf.get("datadir", os.path.dirname(btc_conf_file))
+            if net_name != "mainnet":
+                cookie_dir = os.path.join(cookie_dir, net_name)
+            cookie_file = os.path.join(cookie_dir, ".cookie")
+            try:
+                with open(cookie_file, "r") as fd:
+                    authpair = fd.read()
+            except IOError as err:
+                if "rpcpassword" in conf:
+                    authpair = "%s:%s" % (conf["rpcuser"], conf["rpcpassword"])
+
+                else:
+                    raise ValueError(
+                        "Cookie file unusable (%s) and rpcpassword not specified "
+                        "in the configuration file: %r" % (err, btc_conf_file)
+                    )
+
+        else:
+            url = urlparse.urlparse(service_url)
+            authpair = "%s:%s" % (url.username, url.password)
+
+        if wallet_name:
+            service_url += f"/wallet/{wallet_name}"
+
+        self.url = service_url
+
+        # Credential redacted
+        self.public_url = re.sub(r":[^/]+@", ":***@", self.url, 1)
+        self.__url = urlparse.urlparse(service_url)
+
+        logger.info(f"Initializing RPC client at {self.public_url}")
+
+        if self.__url.scheme not in ("http",):
+            raise ValueError("Unsupported URL scheme %r" % self.__url.scheme)
+
+        if self.__url.port is None:
+            port = httplib.HTTP_PORT
+        else:
+            port = self.__url.port
+        self.__id_count = 0
+
+        if authpair is None:
+            self.__auth_header = None
+        else:
+            authpair = authpair.encode("utf8")
+            self.__auth_header = b"Basic " + base64.b64encode(authpair)
+
+        if connection:
+            self.__conn = connection
+        else:
+            self.__conn = httplib.HTTPConnection(
+                self.__url.hostname, port=port, timeout=timeout
+            )
+
+    def _call(self, service_name, *args):
+        self.__id_count += 1
+
+        postdata = json.dumps(
+            {
+                "version": "1.1",
+                "method": service_name,
+                "params": args,
+                "id": self.__id_count,
+            }
+        )
+
+        logger.debug(f"[{self.public_url}] calling %s%s", service_name, args)
+
+        headers = {
+            "Host": self.__url.hostname,
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Content-type": "application/json",
+        }
+
+        if self.__auth_header is not None:
+            headers["Authorization"] = self.__auth_header
+
+        self.__conn.request("POST", self.__url.path, postdata, headers)
+
+        response = self._get_response()
+        err = response.get("error")
+        if err is not None:
+            if isinstance(err, dict):
+                raise JSONRPCError(
+                    {
+                        "code": err.get("code", -345),
+                        "message": err.get("message", "error message not specified"),
+                    }
+                )
+            raise JSONRPCError({"code": -344, "message": str(err)})
+        elif "result" not in response:
+            raise JSONRPCError({"code": -343, "message": "missing JSON-RPC result"})
+        else:
+            return response["result"]
+
+    def _get_response(self):
+        http_response = self.__conn.getresponse()
+        if http_response is None:
+            raise JSONRPCError(
+                {"code": -342, "message": "missing HTTP response from server"}
+            )
+
+        rdata = http_response.read().decode("utf8")
+        try:
+            return json.loads(rdata, parse_float=Decimal)
+        except Exception:
+            raise JSONRPCError(
+                {
+                    "code": -342,
+                    "message": (
+                        "non-JSON HTTP response with '%i %s' from server: '%.20s%s'"
+                        % (
+                            http_response.status,
+                            http_response.reason,
+                            rdata,
+                            "..." if len(rdata) > 20 else "",
+                        )
+                    ),
+                }
+            )
+
+    def close(self):
+        if self.__conn is not None:
+            self.__conn.close()
+
+    def __del__(self):
+        if self.__conn is not None:
+            self.__conn.close()
+
+
+class RawProxy(BaseProxy):
+    """Low-level proxy to a bitcoin JSON-RPC service
+    Unlike ``Proxy``, no conversion is done besides parsing JSON. As far as
+    Python is concerned, you can call any method; ``JSONRPCError`` will be
+    raised if the server does not recognize it.
+    """
+
+    def __init__(
+        self,
+        service_url=None,
+        service_port=None,
+        btc_conf_file=None,
+        timeout=DEFAULT_HTTP_TIMEOUT,
+        **kwargs,
+    ):
+        super(RawProxy, self).__init__(
+            service_url=service_url,
+            service_port=service_port,
+            btc_conf_file=btc_conf_file,
+            timeout=timeout,
+            **kwargs,
+        )
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            # Prevent RPC calls for non-existing python internal attribute
+            # access. If someone tries to get an internal attribute
+            # of RawProxy instance, and the instance does not have this
+            # attribute, we do not want the bogus RPC call to happen.
+            raise AttributeError
+
+        # Create a callable to do the actual call
+        def _call_wrapper(*args):
+            return self._call(name, *args)
+
+        # Make debuggers show <function bitcoin.rpc.name> rather than <function
+        # bitcoin.rpc.<lambda>>
+        _call_wrapper.__name__ = name
+        return _call_wrapper
+
+
+BitcoinRPC = RawProxy
+
+
+
+
+import hashlib
+import io
+
+
+# TODO: credit buidl-python
+
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+MAINNET_XPRV = bytes.fromhex("0488ade4")
+MAINNET_XPUB = bytes.fromhex("0488b21e")
+MAINNET_YPRV = bytes.fromhex("049d7878")
+MAINNET_YPUB = bytes.fromhex("049d7cb2")
+MAINNET_ZPRV = bytes.fromhex("04b2430c")
+MAINNET_ZPUB = bytes.fromhex("04b24746")
+TESTNET_XPRV = bytes.fromhex("04358394")
+TESTNET_XPUB = bytes.fromhex("043587cf")
+TESTNET_YPRV = bytes.fromhex("044a4e28")
+TESTNET_YPUB = bytes.fromhex("044a5262")
+TESTNET_ZPRV = bytes.fromhex("045f18bc")
+TESTNET_ZPUB = bytes.fromhex("045f1cf6")
+
+
+def raw_decode_base58(s):
+    num = 0
+    # see how many leading 0's we are starting with
+    prefix = b""
+    for c in s:
+        if num == 0 and c == "1":
+            prefix += b"\x00"
+        else:
+            num = 58 * num + BASE58_ALPHABET.index(c)
+    # put everything into base64
+    byte_array = []
+    while num > 0:
+        byte_array.insert(0, num & 255)
+        num >>= 8
+    combined = prefix + bytes(byte_array)
+    checksum = combined[-4:]
+    if hash256(combined[:-4])[:4] != checksum:
+        raise RuntimeError("bad address: {} {}".format(checksum, hash256(combined)[:4]))
+    return combined[:-4]
+
+
+def xpub_to_fp(xpub: str) -> str:
+    raw = raw_decode_base58(xpub)
+
+    if len(raw) != 78:
+        raise ValueError("Not a proper extended key")
+
+    version = raw[:4]
+
+    if version not in (
+        TESTNET_XPUB,
+        TESTNET_YPUB,
+        TESTNET_ZPUB,
+        MAINNET_XPUB,
+        MAINNET_YPUB,
+        MAINNET_ZPUB,
+    ):
+        raise ValueError(f"not an xprv, yprv or zprv: {version}")
+
+    return hash160(raw[-33:])[:4].hex()
+
+
+def decode_base58(s):
+    return raw_decode_base58(s)[1:]
+
+
+def hash160(s):
+    return hashlib.new("ripemd160", hashlib.sha256(s).digest()).digest()
+
+
+def hash256(s):
+    return hashlib.sha256(hashlib.sha256(s).digest()).digest()
+
+
+
+
+import curses
+import contextlib
+import typing as t
+import logging
+import time
+import subprocess
+import http.client
+from pathlib import Path
+from collections import namedtuple
+from typing import Optional as Op
+
+
+logger = logging.getLogger("ui")
+
+colr = curses.color_pair
+bold = curses.A_BOLD
+
+
+class Action:
+    pass
+
+
+class Scene:
+    def set_configs(self, scr, conf, wconfs):
+        self.scr = scr
+        self.config = conf
+        self.wallet_configs = wconfs
+        self.controller = self.config.wizard_controller
+
+    def draw(self, k: int) -> t.Tuple[int, Action]:
+        pass
+
+
+class MenuItem(namedtuple("MenuItem", "idx,title,action")):
+    def args(self, mchoice):
+        return (self.idx, self.title, mchoice == self)
+
+
+class HomeScene(Scene):
+    def __init__(self):
+        super().__init__()
+
+        self.setup_item = MenuItem(0, "start setup", GoSetup)
+        self.monitor_item = MenuItem(1, "monitor wallet", GoHome)
+        self.send_item = MenuItem(2, "send", GoHome)
+        self.recieve_item = MenuItem(3, "receive", GoHome)
+
+        self.mitems = [
+            self.setup_item,
+            self.monitor_item,
+            self.send_item,
+            self.recieve_item,
+        ]
+
+        self.midx = 0
+        self.mchoice = self.setup_item
+
+    def draw(self, k: int) -> t.Tuple[int, Action]:
+        scr = self.scr
+        curses.noecho()
+        height, width = scr.getmaxyx()
+        wconfigs = self.wallet_configs
+
+        if k in [ord("q")]:
+            return (-1, Quit)
+        elif k in [curses.KEY_ENTER, 10, 13]:
+            return (-1, self.mchoice.action)
+
+        if k in [curses.KEY_DOWN, ord("j")] and self.midx < (len(self.mitems) - 1):
+            self.midx += 1
+        elif k in [curses.KEY_UP, ord("k")] and self.midx > 0:
+            self.midx -= 1
+
+        self.mchoice = self.mitems[self.midx]
+
+        # Declaration of strings
+
+        title: str = """
+░█████╗░░█████╗░██╗░░░░░██████╗░░█████╗░░█████╗░██████╗░███████╗
+██╔══██╗██╔══██╗██║░░░░░██╔══██╗██╔══██╗██╔══██╗██╔══██╗██╔════╝
+██║░░╚═╝██║░░██║██║░░░░░██║░░██║██║░░╚═╝██║░░██║██████╔╝█████╗░░
+██║░░██╗██║░░██║██║░░░░░██║░░██║██║░░██╗██║░░██║██╔══██╗██╔══╝░░
+╚█████╔╝╚█████╔╝███████╗██████╔╝╚█████╔╝╚█████╔╝██║░░██║███████╗
+░╚════╝░░╚════╝░╚══════╝╚═════╝░░╚════╝░░╚════╝░╚═╝░░╚═╝╚══════╝
+    """
+
+        title_len = len(title.splitlines()[2])
+        subtitle = "your monetary glue"
+
+        keystr = f"Wallets: {', '.join([w.name for w in wconfigs])}".format(k)[
+            : width - 1
+        ]
+
+        # Centering calculations
+        start_x_title = int((width // 2) - (title_len // 2) - title_len % 2)
+        title_height = len(title.splitlines()) + 1
+
+        title = "\n".join((" " * start_x_title) + line for line in title.splitlines())
+        start_x_subtitle = int((width // 2) - (len(subtitle) // 2) - len(subtitle) % 2)
+        start_x_keystr = int((width // 2) - (len(keystr) // 2) - len(keystr) % 2)
+        start_y = height // 4
+
+        with attrs(scr, colr(2), bold):
+            scr.addstr(start_y, width // 2, title)
+
+        scr.addstr(start_y + title_height, start_x_subtitle, subtitle)
+        scr.addstr(start_y + title_height + 2, start_x_title, "/ " * (title_len // 2))
+
+        if wconfigs:
+            scr.addstr(start_y + title_height + 4, start_x_keystr, keystr)
+
+        def menu_option(idx: int, text: str, selected=False):
+            half = width // 2
+
+            start_str = f'{"":<6}{text:>20}{"":<6}'
+            if selected:
+                start_str = " -> " + start_str[4:]
+            scr.addstr(start_y + title_height + 8 + idx, half, start_str)
+
+        menu_option(*self.setup_item.args(self.mchoice))
+        menu_option(*self.monitor_item.args(self.mchoice))
+        menu_option(*self.send_item.args(self.mchoice))
+        menu_option(*self.recieve_item.args(self.mchoice))
+
+        scr.move(0, 0)
+
+        # Refresh the screen
+        scr.refresh()
+
+        k = scr.getch()
+        # Wait for next input
+        return (k, GoHome)
+
+
+class SetupScene(Scene):
+    def __init__(self):
+        self.bitcoin_rpc = None
+        self.has_setup_coldcard = False
+        self.cc_wallet: Op[t.Any] = None
+        self.public_init_existed: Op[bool] = None
+        self.public_contents: Op[str] = None
+        self.opened_finder: Op[subprocess.Popen] = False
+        self.wrote_config = False
+        self.core_wallet_create = False
+        self.core_imported = False
+        self.core_scantxoutset = False
+
+        self.steps_xpos = 0
+        self.steps_ypos = 0
+
+    def new_step_line(self, msg, *attrs_, ypos: Op[int] = None) -> t.Tuple[int, int]:
+        """Returns (y, x) of final cursor spot."""
+        curr_ypos = ypos or self.steps_ypos
+        with attrs(self.scr, *attrs_):
+            self.scr.addstr(curr_ypos, self.steps_xpos, msg)
+
+        if ypos is None:
+            self.steps_ypos += 1
+        return (curr_ypos, len(msg) + self.steps_xpos)
+
+    def new_sec(self):
+        self.steps_ypos += 1
+
+    def draw(self, k: int) -> t.Tuple[int, Action]:
+        scr = self.scr
+        height, width = scr.getmaxyx()
+        self.steps_ypos = 7
+
+        scr.timeout(400)
+
+        title = f"""
+              __
+.-----.-----.|  |_.--.--.-----.
+|__ --|  -__||   _|  |  |  _  |
+|_____|_____||____|_____|   __| {'=' * (width - 39)}
+                        |__|
+"""
+        y_start = 0
+        x_start = 4
+        self.steps_xpos = x_start + 4
+        check_xpos = self.steps_xpos - 3
+
+        title = "\n".join((" " * x_start) + line for line in title.splitlines())
+
+        with attrs(scr, colr(2), bold):
+            scr.addstr(y_start, x_start, title)
+
+        def wait():
+            """Return this when we're waiting on a step."""
+            return (scr.getch(), GoSetup)
+
+        (core_ypos, _) = self.new_step_line("Searching for Bitcoin Core... ")
+        box(scr, core_ypos, check_xpos)
+
+        if not self.bitcoin_rpc:
+            rpc = None
+            try:
+                for i in ("mainnet", "testnet3"):
+                    try:
+                        logger.info(f"trying RPC for {i}")
+                        rpc = self.config.rpc(net_name=i)
+                        rpc.help()
+                    except:
+                        pass
+                    else:
+                        break
+                if not rpc:
+                    raise ValueError("no rpc")
+
+                self.bitcoin_rpc = rpc
+                scr.refresh()
+                time.sleep(0.6)
+            except Exception:
+                logger.exception("RPC failed")
+                url = getattr(rpc, "url", "???")
+                self.new_step_line(
+                    f"Can't connect to Bitcoin Core (trying {url})", colr(2)
+                )
+                self.new_step_line(
+                    "Try starting Bitcoin Core or editing your config at "
+                    f"{self.config.loaded_from}",
+                    colr(6),
+                )
+                return wait()
+
+        testnet_str = " [testnet]" if self.bitcoin_rpc.net_name == "testnet" else ""
+        self.new_step_line(
+            f"Found it! ({self.bitcoin_rpc.public_url}){testnet_str}", colr(6)
+        )
+        green_check(scr, core_ypos, check_xpos)
+
+        self.new_sec()
+        (cc_ypos, cc_xpos) = self.new_step_line("Have you set up your coldcard? [Y/n] ")
+        box(scr, cc_ypos, check_xpos)
+
+        self.new_step_line("See: https://coldcardwallet.com/docs/quick", colr(4))
+
+        if not self.has_setup_coldcard:
+            if key_y(k):
+                self.has_setup_coldcard = True
+            else:
+                scr.move(cc_ypos, cc_xpos)
+                return wait()
+
+        green_check(scr, cc_ypos, check_xpos)
+
+        self.new_sec()
+        (chain_ypos, chain_xpos) = self.new_step_line("Waiting for chain to sync...")
+        box(scr, chain_ypos, check_xpos)
+
+        chaininfo = self.bitcoin_rpc.getblockchaininfo()
+        progress = chaininfo["verificationprogress"]
+
+        if progress < 0.999:
+            (chain_ypos, chain_xpos) = self.new_step_line(
+                f"Initial block download progress: {progress * 100:.2f}%"
+            )
+            scr.timeout(4000)
+            return wait()
+
+        scr.timeout(400)
+        self.new_step_line(f"Chain synced to height {chaininfo['blocks']}", colr(6))
+        green_check(scr, chain_ypos, check_xpos)
+
+        self.new_sec()
+        (pub_y, _) = self.new_step_line(
+            "Export your Coldcard's public.txt and put it in this directory"
+        )
+        # TODO add spinner
+        box(scr, pub_y, check_xpos)
+
+        self.new_step_line(
+            "See: https://coldcardwallet.com/docs/microsd#dump-summary-file",
+            colr(4),
+        )
+
+        public = Path("./public.txt")
+        if self.public_init_existed is None:
+            self.public_init_existed = public.exists()
+
+        if self.public_contents is None:
+            if not self.public_init_existed:
+                self.new_step_line(
+                    "Here, I'll open a file explorer for you. Drop it in there.",
+                    colr(4),
+                )
+
+                if not self.opened_finder:
+                    self.opened_finder = subprocess.Popen(
+                        "sleep 2; xdg-open .", shell=True
+                    )
+
+            if public.exists() and self.cc_wallet is None:
+                self.public_contents = public.read_text()
+                try:
+                    self.cc_wallet = self.controller.parse_cc_public(
+                        self.public_contents,
+                        self.bitcoin_rpc,
+                    )
+                except Exception:
+                    logger.exception("Failed to parse public.txt contents")
+                    self.cc_wallet = ""
+                    return wait()
+            else:
+                return wait()
+        elif not self.cc_wallet:
+            self.new_step_line(
+                "Failed to extract wallet info from your public.txt!",
+                colr(2),
+            )
+            self.new_step_line(
+                "Check coldcore.log.",
+                colr(2),
+            )
+            return wait()
+
+        self.cc_wallet.bitcoind_json_url = self.bitcoin_rpc.url
+
+        self.new_step_line("Parsed xpub as", colr(6))
+        self.new_step_line(f"  {self.cc_wallet.descriptor_base}", colr(6))
+
+        if not self.wrote_config:
+            self.config.add_new_wallet(self.cc_wallet)
+            self.config.write()
+            self.wrote_config = True
+
+        self.new_step_line(f"Wrote config to {self.config.loaded_from}")
+        green_check(scr, pub_y, check_xpos)
+
+        scr.refresh()
+
+        self.new_sec()
+        (core_y, _) = self.new_step_line("Setting up wallet in core")
+        box(scr, core_y, check_xpos)
+
+        rpc = self.bitcoin_rpc
+
+        if not self.core_wallet_create:
+            self.controller.rpc_wallet_create(rpc, self.cc_wallet)
+            self.core_wallet_create = True
+
+        # Long timeout for scanning.
+
+        self.new_step_line(
+            f"Created wallet {self.cc_wallet.name} in Core as watch-only", colr(6)
+        )
+
+        scr.refresh()
+        if not self.core_imported:
+            rpcw = self.config.rpc(self.cc_wallet, timeout=6000)
+            rpcw.importmulti(*self.cc_wallet.importmulti_args())
+            self.core_imported = True
+
+        self.new_step_line("Imported descriptors 0/* and 1/* (change)", colr(6))
+        (scan_y, _) = self.new_step_line(
+            "Scanning the UTXO set... (may take a few minutes)", colr(0)
+        )
+
+        if not self.core_scantxoutset:
+            rpcw = self.config.rpc(self.cc_wallet, timeout=6000)
+            self.core_scantxoutset = rpcw.scantxoutset(
+                *self.cc_wallet.scantxoutset_args()
+            )
+
+        unspents = self.core_scantxoutset["unspents"]
+        if self.core_scantxoutset["unspents"]:
+            bal = sum([i["amount"] for i in unspents])
+            min_height = min([i["height"] for i in unspents])
+            self.new_step_line(
+                f"Found a balance of {bal} BTC, earliest height: {min_height}",
+                colr(5),
+                ypos=scan_y,
+            )
+        else:
+            self.new_step_line(
+                f"Couldn't find a balance - new wallet eh?",
+                colr(1),
+                ypos=scan_y,
+            )
+
+        # Refresh the screen
+        scr.refresh()
+
+        k = scr.getch()
+        # Wait for next input
+        return (k, GoSetup)
+
+
+def draw_onboard(k: int) -> Action:
+    return Quit
+
+
+def green_check(scr, y, x):
+    with attrs(scr, colr(5), bold):
+        scr.addstr(y, x, "✔")
+
+
+def box(scr, y, x):
+    with attrs(scr, colr(2), bold):
+        scr.addstr(y, x, "□")
+
+
+def key_y(k: int):
+    return k in {ord("y"), ord("Y"), 10, 13, curses.KEY_ENTER}
+
+
+GoHome = Action()
+GoSetup = Action()
+Quit = Action()
+
+
+def draw_menu(scr, config, wallet_configs):
+    # Clear and refresh the screen for a blank canvas
+    scr.clear()
+    scr.refresh()
+
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(5, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.init_pair(6, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+
+    home = HomeScene()
+    home.set_configs(scr, config, wallet_configs)
+
+    setup = SetupScene()
+    setup.set_configs(scr, config, wallet_configs)
+
+    action = GoHome
+    k = 0
+
+    while action != Quit:
+        # Initialization
+        scr.clear()
+        height, width = scr.getmaxyx()
+
+        # FIXME
+        scene = "h o m e"
+
+        try:
+            kstr = curses.keyname(k).decode()
+        except ValueError:
+            kstr = "???"
+
+        statusbarstr = f"Press 'q' to exit | {scene} | last keypress: {kstr} ({k})"
+        if k == -1:
+            statusbarstr += " | waiting"
+        # Render status bar
+        with attrs(scr, colr(3)):
+            scr.addstr(height - 1, 0, statusbarstr)
+            scr.addstr(
+                height - 1, len(statusbarstr), " " * (width - len(statusbarstr) - 1)
+            )
+
+        if action == GoHome:
+            (k, action) = home.draw(k)
+        elif action == GoSetup:
+            (k, action) = setup.draw(k)
+
+        if k == ord("q") or action == Quit:
+            break
+
+
+def wait_for_quit():
+    pass
+
+
+@contextlib.contextmanager
+def attrs(scr, *attrs):
+    for a in attrs:
+        scr.attron(a)
+    yield
+    for a in attrs:
+        scr.attroff(a)
+
+
+def _pad_str(s: str, num: int) -> str:
+    return (" " * num) + s + (" " * num)
+
+
+def start_ui(config, wallet_configs):
+    curses.wrapper(draw_menu, config, wallet_configs)
+
+
+
+
+root_logger = logging.getLogger()
+logger = logging.getLogger(__name__)
+log_filehandler = logging.FileHandler("coldcore.log")
+log_filehandler.setLevel(logging.DEBUG)
+logger.addHandler(log_filehandler)
+logger.setLevel(logging.DEBUG)
+
+BitcoinRPC = RawProxy
+
+cli = App()
+cli.add_arg("--verbose", "-v", action="store_true", default=False)
+cli.add_arg("--config", "-c", action="store", default=None)
+cli.add_arg("--debug", "-d", action="store_true", default=False)
+
+
+CONFIG_DIR = Path.home() / ".config" / "coldcore"
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.ini"
+PASS_PREFIX = "pass:"
+
+
+def setup_logging():
+    if cli.args.debug:
+        root_logger.setLevel(logging.DEBUG)
+        root_logger.addHandler(logging.StreamHandler())
+        root_logger.addHandler(log_filehandler)
+
+
+@dataclass
+class WalletDescriptor:
+    # Without checksum
+    base: str
+    checksum: str
+    is_change: bool
+
+    @property
+    def with_checksum(self):
+        return f"{self.base}#{self.checksum}"
+
+    @classmethod
+    def from_rpc(
+        cls,
+        fingerprint: str,
+        deriv_path: str,
+        xpub: str,
+        is_change: bool,
+        rpc: BitcoinRPC,
+    ) -> "WalletDescriptor":
+        base = mk_desc(fingerprint.lower(), deriv_path, xpub, 1 if is_change else 0)
+        try:
+            checksum = rpc.getdescriptorinfo(base)["checksum"]
+        except JSONRPCError:
+            # TODO handle
+            raise
+        return cls(base, checksum, is_change)
+
+
+def mk_desc(fingerprint: str, deriv_path: str, xpub: str, change: int) -> str:
+    """Return a script descriptor for some part of the wallet."""
+    return f"wpkh([{fingerprint}{deriv_path}]{xpub}/{change}/*)"
+
+
+@dataclass
+class Wallet:
+    fingerprint: str
+    deriv_path: str
+    xpub: str
+    descriptors: t.List[WalletDescriptor] = field(default_factory=list)
+    earliest_block: Op[int] = None
+    bitcoind_json_url: Op[str] = None
+
+    @property
+    def name(self):
+        raise NotImplementedError
+
+    @property
+    def descriptor_base(self):
+        return f"wpkh([{self.fingerprint}{self.deriv_path}]{self.xpub})"
+
+    @property
+    def net_name(self):
+        if self.xpub.startswith("tpub"):
+            return "testnet3"
+        elif self.xpub.startswith("xpub"):
+            return "mainnet"
+        else:
+            raise ValueError("unhandled xpub prefix")
+
+    def scantxoutset_args(self) -> t.Tuple[str, t.List[str]]:
+        return ("start", [d.with_checksum for d in self.descriptors])
+
+    def importmulti_args(self) -> t.Tuple:
+        # TODO: use scantxoutset to take a guess at the earliest we need to do a
+        # full rescan.
+        args = [
+            {
+                "desc": d.with_checksum,
+                "internal": d.is_change,
+                "range": [0, 3000],
+                # TODO be smarter about this
+                # TODO timestamp seems to be disregarded in core?
+                "timestamp": "now",
+                "keypool": True,
+                "watchonly": True,
+            }
+            for d in self.descriptors
+        ]
+
+        return (args,)
+
+    @property
+    def as_ini_dict(self) -> t.Dict:
+        return {
+            "fingerprint": self.fingerprint,
+            "deriv_path": self.deriv_path,
+            "xpub": self.xpub,
+            "bitcoind_json_url": self.bitcoind_json_url or "",
+            "earliest_block": str(self.earliest_block or ""),
+        }
+
+    @property
+    def loaded_xpub(self):
+        if not hasattr(self, "__loaded_xpub"):
+            if self.xpub_descriptor.startswith(PASS_PREFIX):
+                passpath = self.xpub_descriptor.split(PASS_PREFIX, 1)[-1]
+                self.global_config.err(
+                    "Retrieving coldcard info from pass...", file=sys.stderr
+                )
+                self.__loaded_xpub = get_stdout(f"pass show {passpath}").decode()
+            elif self.xpub_descriptor.endswith(".gpg"):
+                self.__loaded_xpub = get_stdout(
+                    f"gpg -d {self.xpub_descriptor}"
+                ).decode()
+            else:
+                self.__loaded_xpub = self.xpub_descriptor
+
+            self.__loaded_xpub = self.__loaded_xpub.strip()
+
+        return self.__loaded_xpub
+
+    @classmethod
+    def from_ini(cls, name: str, rpc: BitcoinRPC, conf: ConfigParser) -> "Wallet":
+        this = conf[name]
+        fp = this["fingerprint"]
+        deriv_path = this["deriv_path"]
+        xpub = this["xpub"]
+        url = this.get("bitcoind_json_url")
+        earliest_block = int(this.get("earliest_block") or 0) or None  # type: ignore
+
+        descs = [
+            WalletDescriptor.from_rpc(
+                fp, deriv_path, xpub, is_change=is_change, rpc=rpc
+            )
+            for is_change in [False, True]
+        ]
+
+        return cls(fp, deriv_path, xpub, descs, earliest_block, url)
+
+
+class CCWallet(Wallet):
+    @property
+    def name(self):
+        return f"coldcard-{self.fingerprint.lower()}"
+
+    @classmethod
+    def from_io(
+        cls, inp: t.IO, rpc: BitcoinRPC, earliest_block: Op[int] = None
+    ) -> "CCWallet":
+        """
+        Instantiate a CCWallet from the public output generated by the
+        coldcard.
+        """
+        # TODO test the shit out of this
+
+        content = inp.read()
+        as_lines = content.splitlines()
+        xpub_prefix = "xpub"
+
+        if re.search(r" => tpub", content):
+            xpub_prefix = "tpub"
+
+        masterpubkey = ""
+        for idx, line in enumerate(as_lines):
+            if "'master' extended public key" in line:
+                masterpubkey = as_lines[idx + 2].strip()
+                if not masterpubkey.startswith(xpub_prefix):
+                    raise ValueError("file format unexpected: master key")
+
+        # We don't do anything with the masterpubkey other than compute a
+        # fingerprint based on it.
+        fp = xpub_to_fp(masterpubkey).lower()
+        del masterpubkey
+
+        m = re.search(r"master key fingerprint: (?P<fp>[a-zA-Z0-9]+)", content)
+
+        # Optionally verify the master key fingerprint with a second source.
+        if m:
+            fp2 = m.groupdict()["fp"].lower()
+
+            if fp2 != fp:
+                raise ValueError(f"fingerprints don't match: {fp} vs. {fp2}")
+
+        m2 = re.search(
+            f"m/84'(?P<deriv_suffix>\\S+) => {xpub_prefix}(?P<xpub>[a-zA-Z0-9]+)",
+            content,
+        )
+
+        if not m2:
+            raise ValueError("couldn't find xpub path")
+
+        deriv_path = "/84h"
+        suffix = m2.groupdict()["deriv_suffix"]
+
+        if not re.fullmatch(r"(/\d+'?)+", suffix):
+            raise ValueError(f"derivation path not expected: {suffix}")
+
+        deriv_path += suffix.replace("'", "h")
+
+        if not re.search(deriv_path.replace("h", "'") + f" => {xpub_prefix}", content):
+            raise ValueError(f"inferred derivation path appears invalid: {deriv_path}")
+
+        xpub: str = xpub_prefix + m2.groupdict()["xpub"]
+
+        descs = [
+            WalletDescriptor.from_rpc(
+                fp, deriv_path, xpub, is_change=is_change, rpc=rpc
+            )
+            for is_change in [False, True]
+        ]
+
+        return cls(
+            fp,
+            deriv_path,
+            xpub,
+            descriptors=descs,
+            earliest_block=earliest_block,
+        )
+
+
+@dataclass
+class UTXO:
+    address: str
+    amount: Decimal
+    num_confs: int
+    txid: str
+    vout: int
+
+    @classmethod
+    def from_listunspent(cls, rpc_outs: t.List[t.Dict]) -> t.List["UTXO"]:
+        return [
+            cls(
+                out["address"],
+                out["amount"],
+                out["confirmations"],
+                out["txid"],
+                out["vout"],
+            )
+            for out in rpc_outs
+        ]
+
+
+class WizardController:
+    def create_config(self) -> "GlobalConfig":
+        if not CONFIG_DIR.exists():
+            # FIXME macOS
+            CONFIG_DIR.mkdir(mode=0o700, parents=True)
+
+        if not DEFAULT_CONFIG_PATH.exists():
+            with open(DEFAULT_CONFIG_PATH, "w") as f:
+                GlobalConfig.write_blank(f)
+
+        cf = ConfigParser()
+        cf.read(DEFAULT_CONFIG_PATH)
+        return GlobalConfig.from_ini(str(DEFAULT_CONFIG_PATH), cf)[0]
+
+    def parse_cc_public(self, contents: str, rpc: BitcoinRPC) -> CCWallet:
+        return CCWallet.from_io(io.StringIO(contents), rpc)
+
+    def rpc_wallet_create(self, *args, **kwargs):
+        return rpc_wallet_create(*args, **kwargs)
+
+
+@dataclass
+class GlobalConfig:
+    loaded_from: str
+    raw_config: ConfigParser
+    bitcoind_json_url: Op[str] = None
+    default_wallet: Op[str] = None
+    stdout: t.IO = sys.stdout
+    stderr: t.IO = sys.stderr
+    wizard_controller: WizardController = WizardController()
+
+    def echo(self, *args, **kwargs):
+        print(*args, file=self.stdout, **kwargs)
+
+    def err(self, *args, **kwargs):
+        print(*args, file=self.stderr, **kwargs)
+
+    def exit(self, code):
+        # To be overridden in unittests.
+        sys.exit(code)
+
+    def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
+        if wallet:
+            plain_rpc = self._rpc(net_name=wallet.net_name, **kwargs)
+            try:
+                plain_rpc.loadwallet(wallet.name)
+            except JSONRPCError as e:
+                # Wallet already loaded.
+                if e.error.get("code") != -4:  # type: ignore
+                    raise
+            return self._rpc(
+                net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
+            )
+        return self._rpc(**kwargs)
+
+    def _rpc(
+        self, url: Op[str] = None, timeout: int = (60 * 5), **kwargs
+    ) -> BitcoinRPC:
+        logger.info(url)
+        return BitcoinRPC(
+            url or self.bitcoind_json_url,
+            timeout=timeout,
+            debug_stream=(sys.stderr if cli.args.debug else None),
+            **kwargs,
+        )
+
+    @classmethod
+    def from_ini(
+        cls, loaded_from: str, conf: ConfigParser
+    ) -> t.Tuple["GlobalConfig", t.List["Wallet"]]:
+        sect = conf["default"]
+        c = cls(
+            loaded_from,
+            conf,
+            sect.get("bitcoind_json_url", None),
+            sect.get("default_wallet"),
+        )
+        wallets = []
+
+        for key in conf.sections():
+            if key != "default":
+                net_name = "mainnet"
+
+                WalletClass = {"coldcard": CCWallet}.get(key.split("-")[0])
+
+                if not WalletClass:
+                    raise ValueError(f"unrecognized wallet type for {key}")
+
+                if conf[key].get("xpub", "").startswith("tpub"):
+                    net_name = "testnet3"
+                rpc = c.rpc(net_name=net_name)
+                try:
+                    wallets.append(WalletClass.from_ini(key, rpc, conf))
+                except Exception:
+                    msg = f"Unable to read config section '{key}'"
+                    logger.exception(msg)
+                    c.err(msg)
+
+        return (c, wallets)
+
+    @classmethod
+    def write_blank(cls, outfile: t.IO):
+        """Write a blank configuration file."""
+        outfile.write(
+            textwrap.dedent(
+                """
+            [default]
+
+            # If blank, this will default to something like
+            #   http://localhost:8332
+            # You can specify non-localhosts like
+            #   http://your_rpc_user:rpcpassword@some_host:8332/
+            bitcoin_json_url =
+
+            # This corresponds to one of the wallet sections listed below,
+            # and will be used for commands where a single wallet is required
+            # but unspecified.
+            default_wallet =
+            """
+            )
+        )
+
+        p = Path(outfile.name)
+
+        # Ensure that the created file is only readable by the owner.
+        if p.exists():
+            # FIXME make cross-platform
+            _sh(f"chmod 600 {p}")
+
+    def add_new_wallet(self, w: Wallet):
+        logger.info("Adding new wallet to config: %s", w.as_ini_dict)
+        self.raw_config[w.name] = w.as_ini_dict
+
+    def write(self):
+        """Save the contents of this config to an INI file on disk."""
+        if self.loaded_from.startswith(PASS_PREFIX):
+            raise ValueError("can't write config back to pass")
+
+        with open(self.loaded_from, "w") as f:
+            self.raw_config.write(f)
+
+
+def get_stdout(*args, **kwargs) -> bytes:
+    kwargs["shell"] = True
+    kwargs["capture_output"] = True
+    return subprocess.run(*args, **kwargs).stdout
+
+
+def _sh(*args, **kwargs) -> subprocess.CompletedProcess:
+    kwargs.setdefault("shell", True)
+    return subprocess.run(*args, **kwargs)
+
+
+def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
+    try:
+        rpc.createwallet(wall.name, True)
+    except JSONRPCError as e:
+        if e.error.get("code") != -4:  # type: ignore
+            # Wallet already exists; ok.
+            raise
+
+
+@cli.cmd
+def setup():
+    """Run initial setup for a wallet."""
+    config, [wall] = get_config()
+    rpc = config.rpc()
+    rpcw = config.rpc(wall)
+
+    rpc_wallet_create(rpc, wall)
+    config.echo(rpcw.importmulti(*wall.importmulti_args()))
+    config.echo(rpcw.rescanblockchain(610000))
+    # TODO: above call will block. run in thread and poll with getwalletinfo.
+    return True
+
+
+@cli.cmd
+def watch():
+    """Watch activity related to your wallets."""
+    config, [wall] = get_config()
+    rpcw = config.rpc(wall)
+
+    def get_utxos() -> t.Dict[str, "UTXO"]:
+        return {
+            u.address: u
+            for u in UTXO.from_listunspent(rpcw.listunspent(0))  # includes unconfirmed
+        }
+
+    utxos = get_utxos()
+    config.echo(f"Watching wallet {config.wallet_name}")
+
+    while True:
+        new_utxos = get_utxos()
+
+        spent_addrs = utxos.keys() - new_utxos.keys()
+        new_addrs = new_utxos.keys() - utxos.keys()
+
+        for addr in spent_addrs:
+            u = utxos[addr]
+            config.echo(f"Saw spend: {u.address} ({u.amount})")
+
+        for addr in new_addrs:
+            u = new_utxos[addr]
+            config.echo(f"Got new UTXO: {u.address} ({u.amount})")
+
+        was_zeroconf = [new_utxos[k] for k, v in utxos.items() if v.num_confs == 0]
+        finally_confed = [utxo for utxo in was_zeroconf if utxo.num_confs > 0]
+
+        for u in finally_confed:
+            config.echo(f"UTXO confirmed! {u.address} ({u.amount})")
+
+        utxos = new_utxos
+        time.sleep(0.1)
+
+
+@cli.cmd
+def balance():
+    """Check your wallet balances."""
+    config, [wall] = get_config()
+    rpcw = config.rpc(wall)
+    utxos = UTXO.from_listunspent(rpcw.listunspent(0))  # includes unconfirmed
+    utxos = sorted(utxos, key=lambda u: -u.num_confs)
+
+    for utxo in utxos:
+        config.echo(f"{utxo.address:<40} {utxo.num_confs:>10} {utxo.amount}")
+
+    amt = sum(u.amount for u in utxos)
+    config.echo(f"total: {len(utxos)} ({amt})")
+    return True
+
+
+@cli.cmd
+def prepare_send(to_address: str, amount: str, spend_from: str = ""):
+    """
+    Prepare a sending PSBT.
+
+    Args:
+        to_address: which address to send to
+        amount: amount to send in BTC
+        spend_from: comma-separated addresses to pull unspents from as inputs
+    """
+    config, [wall] = get_config()
+    rpcw = config.rpc(wall)
+    spend_from_ls = spend_from.split(",")
+    vins = []
+
+    if spend_from_ls:
+        utxos = UTXO.from_listunspent(rpcw.listunspent(0))
+        addrs = {u.address for u in utxos}
+        unknown_addrs = set(spend_from_ls) - addrs
+
+        for addr in unknown_addrs:
+            # TODO should fail?
+            config.echo(f"WARNING: address '{addr}' not in wallet")
+
+        for u in utxos:
+            if u.address in spend_from:
+                vins.append({"txid": u.txid, "vout": u.vout})
+
+    # Check to see if we own this address with getaddressinfo
+
+    try:
+        result = rpcw.walletcreatefundedpsbt(
+            vins,  # inputs for txn (manual coin control)
+            [{to_address: amount}],
+            0,  # locktime
+            {"includeWatching": True},  # options; 'feeRate'?
+            True,  # bip32derivs - include BIP32 derivation paths for pubkeys if known
+        )
+    except Exception as e:
+        # error code: -5 indicates bad address; handle that.
+        if e.error.get("code") == -5:  # type: ignore
+            config.echo(f"Bad address specified: {e}")
+            return False
+        raise
+
+    nowstr = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+    filename = f"unsigned-{nowstr}.psbt"
+    Path(filename).write_bytes(base64.b64decode(result["psbt"]))
+
+    config.echo(result)
+    config.echo(f"Wrote PSBT to {filename} - sign with coldcard")
+
+
+@cli.cmd
+def broadcast(signed_psbt_path: Path):
+    """Broadcast a signed PSBT."""
+    config, [wall] = get_config()
+    rpcw = config.rpc(wall)
+    content: bytes = signed_psbt_path.read_bytes().strip()
+    hex_val: str = ""
+
+    # Handle signed TX as raw binary.
+    if content[0:5] == b"psbt\xff":
+        to_ascii = base64.b64encode(content).decode()
+        # TODO handle errors
+        hex_val = rpcw.finalizepsbt(to_ascii)["hex"]
+
+    # Handle signed TX as base64.
+    elif content[0:6] == b"cHNidP":
+        # TODO handle errors
+        hex_val = rpcw.finalizepsbt(content.decode())["hex"]
+
+    # Handle signed TX as hex.
+    elif _can_decode_transaction(rpcw, content.decode()):
+        hex_val = content.decode()
+
+    else:
+        raise ValueError("unrecognized signed PSBT format")
+
+    assert hex_val
+    if not _confirm_tx(config, rpcw, hex_val):
+        return False
+    config.echo(rpcw.sendrawtransaction(hex_val))
+    return True
+
+
+@cli.cmd
+def newaddr():
+    config, [wall] = get_config()
+    rpcw = config.rpc(wall)
+    config.echo(rpcw.getnewaddress())
+
+
+@cli.cmd
+def ui():
+    """Start a curses UI."""
+    config, walls = get_config()
+    log_filehandler.setLevel(logging.DEBUG)
+    root_logger.handlers = [log_filehandler]
+    start_ui(config, walls)
+
+
+def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
+    try:
+        got = rpc.decoderawtransaction(tx_hex)
+        assert got["txid"]
+    except Exception:
+        return False
+    return True
+
+
+def _confirm_tx(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> bool:
+    """Display information about the transaction to be performed and confirm."""
+    info = rpcw.decoderawtransaction(hex_val)
+    outs: t.List[t.Tuple[str, Decimal]] = []
+
+    for out in info["vout"]:
+        addrs = ",".join(out["scriptPubKey"]["addresses"])
+        outs.append((addrs, out["value"]))
+
+    config.echo("About to send a transaction:\n")
+    for o in outs:
+        try:
+            addr_info = rpcw.getaddressinfo(o[0])
+        except Exception:
+            # TODO handle this
+            raise
+
+        yours = addr_info["ismine"] or addr_info["iswatchonly"]
+        yours_str = "  (your address)" if yours else ""
+        config.echo(f" -> {o[0]}  ({o[1]} BTC){yours_str}")
+
+    config.echo("\n")
+
+    inp = input("Look okay? [y/N]: ").strip().lower()
+
+    if inp != "y":
+        config.echo("Aborting transaction! Doublespend the inputs!")
+        return False
+    return True
+
+
+def get_config(
+    wallet_names: Op[t.List[str]] = None,
+) -> t.Tuple[GlobalConfig, t.List[Wallet]]:
+    confp = ConfigParser()
+    conf_path = cli.args.config or DEFAULT_CONFIG_PATH
+
+    # TODO this is okay for right now, but maybe think about making this less
+    # automatic and more explicit.
+    if conf_path == DEFAULT_CONFIG_PATH and not DEFAULT_CONFIG_PATH.exists():
+        logger.info(f"Creating blank configuration at {DEFAULT_CONFIG_PATH}")
+        with open(DEFAULT_CONFIG_PATH, "w") as f:
+            GlobalConfig.write_blank(f)
+
+    # Optionally, read the configuration from `pass`.
+    if str(conf_path).startswith(PASS_PREFIX):
+        passname = str(conf_path).split(PASS_PREFIX, 1)[-1]
+        conf_str = get_stdout(f"pass show {passname}").decode()
+        confp.read_string(conf_str)
+    # Or just read it from some file path.
+    else:
+        confp.read(conf_path)
+    (conf, wallet_confs) = GlobalConfig.from_ini(str(conf_path), confp)
+
+    unrecog_wallets = set(wallet_names or []) - set(w.name for w in wallet_confs)
+    if unrecog_wallets:
+        conf.err("Unrecognized wallet names: {', '.join(unrecog_wallets)}")
+        conf.exit(1)
+
+    if wallet_names:
+        wallet_confs = [w for w in wallet_confs if w.name in wallet_names]
+
+    return (conf, wallet_confs)
+
+
+if __name__ == "__main__":
+    cli.parse_for_run()
+    setup_logging()
+    cli.run()
