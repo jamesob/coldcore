@@ -4,7 +4,7 @@ import typing as t
 import logging
 import time
 import subprocess
-import http.client
+from decimal import Decimal
 from pathlib import Path
 from collections import namedtuple
 from typing import Optional as Op
@@ -95,19 +95,24 @@ class HomeScene(Scene):
         start_x_title = int((width // 2) - (title_len // 2) - title_len % 2)
         title_height = len(title.splitlines()) + 1
 
-        title = "\n".join((" " * start_x_title) + line for line in title.splitlines())
+        start_y = height // 4
+        title = "\n".join(
+            ((" " * start_x_title) + line)[: width - start_y]
+            for line in title.splitlines()
+        )
         start_x_subtitle = int((width // 2) - (len(subtitle) // 2) - len(subtitle) % 2)
         start_x_keystr = int((width // 2) - (len(keystr) // 2) - len(keystr) % 2)
-        start_y = height // 4
 
         with attrs(scr, colr(2), bold):
             scr.addstr(start_y, width // 2, title)
 
-        scr.addstr(start_y + title_height, start_x_subtitle, subtitle)
-        scr.addstr(start_y + title_height + 2, start_x_title, "/ " * (title_len // 2))
+        scr.addstr(start_y + title_height, start_x_subtitle, subtitle[:width])
+        scr.addstr(
+            start_y + title_height + 2, start_x_title, ("/ " * (title_len // 2))[:width]
+        )
 
         if wconfigs:
-            scr.addstr(start_y + title_height + 4, start_x_keystr, keystr)
+            scr.addstr(start_y + title_height + 4, start_x_keystr, keystr[:width])
 
         def menu_option(idx: int, text: str, selected=False):
             half = width // 2
@@ -115,7 +120,7 @@ class HomeScene(Scene):
             start_str = f'{"":<6}{text:>20}{"":<6}'
             if selected:
                 start_str = " -> " + start_str[4:]
-            scr.addstr(start_y + title_height + 8 + idx, half, start_str)
+            scr.addstr(start_y + title_height + 8 + idx, half, start_str[:width])
 
         menu_option(*self.setup_item.args(self.mchoice))
         menu_option(*self.monitor_item.args(self.mchoice))
@@ -144,18 +149,36 @@ class SetupScene(Scene):
         self.core_wallet_create = False
         self.core_imported = False
         self.core_scantxoutset = False
+        self.scan_from_height = None
+        self.have_rescanned = False
+        self.chain_synced_info = None
+        self.testaddress1 = None
+        self.receive_utxo1 = None
+        self.prepared_tx = None
+        self.test_tx_hex = None
+        self.test_tx_info = None
+        self.confirm_send = False
+        self.receive_utxo2 = None
 
         self.steps_xpos = 0
         self.steps_ypos = 0
+        self.i = 0
+        self.height = self.width = 0
 
     def new_step_line(self, msg, *attrs_, ypos: Op[int] = None) -> t.Tuple[int, int]:
         """Returns (y, x) of final cursor spot."""
         curr_ypos = ypos or self.steps_ypos
         with attrs(self.scr, *attrs_):
-            self.scr.addstr(curr_ypos, self.steps_xpos, msg)
+            self.scr.addstr(curr_ypos, self.steps_xpos, msg[: self.width])
 
         if ypos is None:
             self.steps_ypos += 1
+
+        if self.steps_ypos >= (self.height - 2):
+            # Scroll to make room
+            self.scr.scrollok(True)
+            self.scr.scroll((self.steps_ypos - self.height) + 2)
+
         return (curr_ypos, len(msg) + self.steps_xpos)
 
     def new_sec(self):
@@ -163,8 +186,12 @@ class SetupScene(Scene):
 
     def draw(self, k: int) -> t.Tuple[int, Action]:
         scr = self.scr
-        height, width = scr.getmaxyx()
+        self.height, self.width = scr.getmaxyx()
         self.steps_ypos = 7
+
+        self.i += 1
+        if self.i % 1000 == 0:
+            self.i = 0
 
         scr.timeout(400)
 
@@ -172,7 +199,7 @@ class SetupScene(Scene):
               __
 .-----.-----.|  |_.--.--.-----.
 |__ --|  -__||   _|  |  |  _  |
-|_____|_____||____|_____|   __| {'=' * (width - 39)}
+|_____|_____||____|_____|   __| {'=' * (self.width - 39)}
                         |__|
 """
         y_start = 0
@@ -180,14 +207,22 @@ class SetupScene(Scene):
         self.steps_xpos = x_start + 4
         check_xpos = self.steps_xpos - 3
 
-        title = "\n".join((" " * x_start) + line for line in title.splitlines())
+        title = "\n".join(
+            ((" " * x_start) + line)[: (self.width - y_start)]
+            for line in title.splitlines()
+        )
 
         with attrs(scr, colr(2), bold):
             scr.addstr(y_start, x_start, title)
 
         def wait():
             """Return this when we're waiting on a step."""
+            scr.refresh()
             return (scr.getch(), GoSetup)
+
+        def delay_for_effect():
+            scr.refresh()
+            time.sleep(0.6)
 
         (core_ypos, _) = self.new_step_line("Searching for Bitcoin Core... ")
         box(scr, core_ypos, check_xpos)
@@ -195,21 +230,12 @@ class SetupScene(Scene):
         if not self.bitcoin_rpc:
             rpc = None
             try:
-                for i in ("mainnet", "testnet3"):
-                    try:
-                        logger.info(f"trying RPC for {i}")
-                        rpc = self.config.rpc(net_name=i)
-                        rpc.help()
-                    except:
-                        pass
-                    else:
-                        break
-                if not rpc:
-                    raise ValueError("no rpc")
+                self.bitcoin_rpc = self.controller.discover_rpc(self.config)
 
-                self.bitcoin_rpc = rpc
-                scr.refresh()
-                time.sleep(0.6)
+                if not self.bitcoin_rpc:
+                    raise ValueError("no rpc found")
+
+                delay_for_effect()
             except Exception:
                 logger.exception("RPC failed")
                 url = getattr(rpc, "url", "???")
@@ -248,18 +274,26 @@ class SetupScene(Scene):
         (chain_ypos, chain_xpos) = self.new_step_line("Waiting for chain to sync...")
         box(scr, chain_ypos, check_xpos)
 
-        chaininfo = self.bitcoin_rpc.getblockchaininfo()
-        progress = chaininfo["verificationprogress"]
+        if not self.chain_synced_info:
+            # Really just for effect.
+            delay_for_effect()
 
-        if progress < 0.999:
-            (chain_ypos, chain_xpos) = self.new_step_line(
-                f"Initial block download progress: {progress * 100:.2f}%"
-            )
-            scr.timeout(4000)
-            return wait()
+            chaininfo = self.bitcoin_rpc.getblockchaininfo()
+            progress = chaininfo["verificationprogress"]
+
+            if progress < 0.999:
+                (chain_ypos, chain_xpos) = self.new_step_line(
+                    f"Initial block download progress: {progress * 100:.2f}%"
+                )
+                scr.timeout(4000)
+                return wait()
+            else:
+                self.chain_synced_info = chaininfo
 
         scr.timeout(400)
-        self.new_step_line(f"Chain synced to height {chaininfo['blocks']}", colr(6))
+        self.new_step_line(
+            f"Chain synced to height {self.chain_synced_info['blocks']}", colr(6)
+        )
         green_check(scr, chain_ypos, check_xpos)
 
         self.new_sec()
@@ -279,6 +313,7 @@ class SetupScene(Scene):
             self.public_init_existed = public.exists()
 
         if self.public_contents is None:
+            delay_for_effect()
             if not self.public_init_existed:
                 self.new_step_line(
                     "Here, I'll open a file explorer for you. Drop it in there.",
@@ -346,15 +381,18 @@ class SetupScene(Scene):
         )
 
         scr.refresh()
+
         if not self.core_imported:
             rpcw = self.config.rpc(self.cc_wallet, timeout=6000)
             rpcw.importmulti(*self.cc_wallet.importmulti_args())
             self.core_imported = True
 
         self.new_step_line("Imported descriptors 0/* and 1/* (change)", colr(6))
-        (scan_y, _) = self.new_step_line(
+        (scan_y, scan_x) = self.new_step_line(
             "Scanning the UTXO set... (may take a few minutes)", colr(0)
         )
+
+        scr.refresh()
 
         if not self.core_scantxoutset:
             rpcw = self.config.rpc(self.cc_wallet, timeout=6000)
@@ -365,25 +403,219 @@ class SetupScene(Scene):
         unspents = self.core_scantxoutset["unspents"]
         if self.core_scantxoutset["unspents"]:
             bal = sum([i["amount"] for i in unspents])
-            min_height = min([i["height"] for i in unspents])
+            self.scan_from_height = min([i["height"] for i in unspents])
             self.new_step_line(
-                f"Found a balance of {bal} BTC, earliest height: {min_height}",
+                f"Found a balance of {bal} BTC, earliest height: "
+                f"{self.scan_from_height}",
                 colr(5),
+                bold,
                 ypos=scan_y,
             )
         else:
             self.new_step_line(
-                f"Couldn't find a balance - new wallet eh?",
+                "Couldn't find a balance - new wallet eh?",
                 colr(1),
                 ypos=scan_y,
             )
+        green_check(scr, core_y, check_xpos)
 
+        scr.refresh()
+
+        if self.scan_from_height:
+            self.new_sec()
+            (scanbc_y, _) = self.new_step_line(
+                f"Scanning the chain history since block {self.scan_from_height}. "
+                "I'd get a coffee tbh.",
+                colr(0),
+            )
+            self.new_step_line(
+                "This helps us index transactions associated with your coins.",
+                colr(4),
+            )
+
+            scr.refresh()
+
+            if not self.have_rescanned:
+                rpcw = self.config.rpc(self.cc_wallet, timeout=0)
+                box(scr, scanbc_y, check_xpos)
+                scr.refresh()
+                rpcw.rescanblockchain(self.scan_from_height)
+                self.have_rescanned = True
+
+            self.new_step_line("Scan complete", colr(6))
+            green_check(scr, scanbc_y, check_xpos)
+
+        self.new_sec()
+        (testy, _) = self.new_step_line(
+            "OK, now let's test your wallet by receiving a test transaction."
+        )
+        box(scr, testy, check_xpos)
+
+        if not self.testaddress1:
+            rpcw = self.config.rpc(self.cc_wallet)
+            self.testaddress1 = rpcw.getnewaddress()
+
+        self.new_step_line("Send a tiny test amount to")
+        self.new_step_line("")
+        self.new_step_line(f"    {self.testaddress1}", colr(2), bold)
+        self.new_step_line("")
+        (waity, waitx) = self.new_step_line("Waiting for transaction", colr(4), bold)
+
+        if not self.receive_utxo1:
+            scr.addstr(waity, waitx + 1, self._get_scroller())
+
+            scr.timeout(2000)
+            rpcw = self.config.rpc(self.cc_wallet)
+            utxos = self.controller.get_utxos(rpcw)
+            self.receive_utxo1 = utxos.get(self.testaddress1)
+
+            if not self.receive_utxo1:
+                return wait()
+
+        self.new_step_line(
+            f"Received amount of {self.receive_utxo1.amount} "
+            f"({self.receive_utxo1.txid[:8]})",
+            colr(5),
+            bold,
+            ypos=waity,
+        )
+        green_check(scr, testy, check_xpos)
+
+        self.new_sec()
+        (testy, _) = self.new_step_line("Now let's test your sending capabilities.")
+
+        if not self.prepared_tx:
+            rpcw = self.config.rpc(self.cc_wallet)
+            self.toaddress1 = rpcw.getnewaddress()
+
+            # Send 90% of the value over.
+            # TODO this is only for testing and is potentially dangerous
+            send_amt = str((self.receive_utxo1.amount * 9) / 10)
+            self.prepared_tx = self.controller.prepare_send(
+                self.config,
+                rpcw,
+                self.toaddress1,
+                send_amt,
+                [self.receive_utxo1.address],
+            )
+
+        self.new_step_line(
+            f"You're going to send to another address you own, {self.toaddress1}."
+        )
+        self.new_step_line(f"I've prepared a transaction called '{self.prepared_tx}'")
+        box(scr, testy, check_xpos)
+
+        self.new_step_line(
+            "Here, I'll open a file explorer for you.",
+            colr(4),
+        )
+
+        self.new_step_line(
+            "Transfer it to your coldcard via microSD from there.",
+            colr(4),
+        )
+
+        if not self.opened_finder:
+            self.opened_finder = subprocess.Popen("sleep 2; xdg-open .", shell=True)
+
+        # TODO: coldcard specific?
+        signed_filename = self.prepared_tx.replace(".psbt", "-signed.psbt")
+
+        (wait2y, wait2x) = self.new_step_line(
+            f"Waiting for the signed file ({signed_filename})", colr(4), bold
+        )
+
+        filepath = Path(signed_filename)
+        if not filepath.exists():
+            scr.addstr(wait2y, wait2x + 1, self._get_scroller())
+            return wait()
+        else:
+            rpcw = self.config.rpc(self.cc_wallet)
+            self.test_tx_hex = self.controller.psbt_to_tx_hex(rpcw, filepath)
+
+        self.new_step_line("Cool, got the signed PSBT!", colr(6), bold)
+
+        if not self.test_tx_info:
+            rpcw = self.config.rpc(self.cc_wallet)
+            self.test_tx_info = _get_tx_info(rpcw, self.test_tx_hex)
+
+        assert len(self.test_tx_info) == 2
+        self.new_step_line(f"  {self.test_tx_info[0]}", colr(0), bold)
+        self.new_step_line("Confirm send? [y/n]", colr(2), bold)
+
+        if not self.confirm_send:
+            if key_y(k):
+                self.confirm_send = True
+                rpcw.sendrawtransaction(self.test_tx_hex)
+            else:
+                return wait()
+
+        self.new_step_line("Transaction broadcast!", colr(2), bold)
+        (waity2, waitx2) = self.new_step_line("Waiting for transaction", colr(4), bold)
+
+        if not self.receive_utxo2:
+            scr.addstr(waity2, waitx2 + 1, self._get_scroller())
+
+            scr.timeout(1000)
+            rpcw = self.config.rpc(self.cc_wallet)
+            utxos = self.controller.get_utxos(rpcw)
+            self.receive_utxo2 = utxos.get(self.toaddress1)
+
+            if not self.receive_utxo2:
+                return wait()
+
+        self.new_step_line(
+            f"Received amount of {self.receive_utxo2.amount} "
+            f"({self.receive_utxo2.txid[:8]})",
+            colr(5),
+            bold,
+            ypos=waity,
+        )
+        green_check(scr, testy, check_xpos)
+
+        self.new_step_line("Your wallet is good to go! Press q to exit.", colr(5), bold)
+
+        scr.move(self.height - 1, self.width - 1)
         # Refresh the screen
         scr.refresh()
 
         k = scr.getch()
         # Wait for next input
         return (k, GoSetup)
+
+    def _get_scroller(self, do_spin=True):
+        if not do_spin:
+            return "   "
+        modi = self.i % 3
+        return {
+            0: "[.  ]",
+            1: "[ . ]",
+            2: "[  .]",
+        }[modi]
+
+
+def _get_tx_info(rpcw, hex_val: str) -> t.List[str]:
+    """Return a list of strings detailing the actions of a tx."""
+    info = rpcw.decoderawtransaction(hex_val)
+    outs: t.List[t.Tuple[str, Decimal]] = []
+    out_strs = []
+
+    for out in info["vout"]:
+        addrs = ",".join(out["scriptPubKey"]["addresses"])
+        outs.append((addrs, out["value"]))
+
+        for o in outs:
+            try:
+                addr_info = rpcw.getaddressinfo(o[0])
+            except Exception:
+                # TODO handle this
+                raise
+
+            yours = addr_info["ismine"] or addr_info["iswatchonly"]
+            yours_str = "  (your address)" if yours else ""
+            out_strs.append(f"-> {o[0]}  ({o[1]} BTC){yours_str}")
+
+    return out_strs
 
 
 def draw_onboard(k: int) -> Action:
@@ -413,6 +645,7 @@ def draw_menu(scr, config, wallet_configs):
     # Clear and refresh the screen for a blank canvas
     scr.clear()
     scr.refresh()
+    scr.scrollok(True)
 
     curses.start_color()
     curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
@@ -449,10 +682,16 @@ def draw_menu(scr, config, wallet_configs):
             statusbarstr += " | waiting"
         # Render status bar
         with attrs(scr, colr(3)):
-            scr.addstr(height - 1, 0, statusbarstr)
-            scr.addstr(
-                height - 1, len(statusbarstr), " " * (width - len(statusbarstr) - 1)
-            )
+            try:
+                scr.addstr(height - 1, 0, statusbarstr[:width])
+                scr.addstr(
+                    height - 1,
+                    len(statusbarstr),
+                    (" " * (width - len(statusbarstr) - 1))[:width],
+                )
+                # TODO
+            except Exception:
+                pass
 
         if action == GoHome:
             (k, action) = home.draw(k)
@@ -461,10 +700,6 @@ def draw_menu(scr, config, wallet_configs):
 
         if k == ord("q") or action == Quit:
             break
-
-
-def wait_for_quit():
-    pass
 
 
 @contextlib.contextmanager

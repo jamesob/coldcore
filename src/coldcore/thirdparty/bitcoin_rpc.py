@@ -19,6 +19,8 @@ import json
 import platform
 import urllib.parse as urlparse
 import re
+import time
+import http.client
 from typing import IO, Optional as Op
 from decimal import Decimal
 
@@ -52,21 +54,21 @@ class BaseProxy(object):
         self,
         service_url=None,
         service_port=None,
-        wallet_name=None,
         btc_conf_file=None,
         net_name=None,
         timeout=DEFAULT_HTTP_TIMEOUT,
         connection=None,
         debug_stream: Op[IO] = None,
+        wallet_name=None,
     ):
 
         # Create a dummy connection early on so if __init__() fails prior to
         # __conn being created __del__() can detect the condition and handle it
         # correctly.
-        self.__conn = None
         self.debug_stream = debug_stream
         authpair = None
         net_name = net_name or "mainnet"
+        self.timeout = timeout
         self.net_name = net_name
 
         if service_url is None:
@@ -134,35 +136,32 @@ class BaseProxy(object):
         if wallet_name:
             service_url += f"/wallet/{wallet_name}"
 
+        logger.info(f"SERVICE URL: {service_url}")
         self.url = service_url
 
         # Credential redacted
         self.public_url = re.sub(r":[^/]+@", ":***@", self.url, 1)
-        self.__url = urlparse.urlparse(service_url)
+        self._parsed_url = urlparse.urlparse(service_url)
 
         logger.info(f"Initializing RPC client at {self.public_url}")
 
-        if self.__url.scheme not in ("http",):
-            raise ValueError("Unsupported URL scheme %r" % self.__url.scheme)
+        if self._parsed_url.scheme not in ("http",):
+            raise ValueError("Unsupported URL scheme %r" % self._parsed_url.scheme)
 
-        if self.__url.port is None:
-            port = httplib.HTTP_PORT
-        else:
-            port = self.__url.port
         self.__id_count = 0
 
-        if authpair is None:
-            self.__auth_header = None
-        else:
-            authpair = authpair.encode("utf8")
-            self.__auth_header = b"Basic " + base64.b64encode(authpair)
+        self.__auth_header = None
+        if authpair:
+            self.__auth_header = b"Basic " + base64.b64encode(authpair.encode("utf8"))
 
-        if connection:
-            self.__conn = connection
+    def _getconn(self):
+        if self._parsed_url.port is None:
+            port = httplib.HTTP_PORT
         else:
-            self.__conn = httplib.HTTPConnection(
-                self.__url.hostname, port=port, timeout=timeout
-            )
+            port = self._parsed_url.port
+        return httplib.HTTPConnection(
+            self._parsed_url.hostname, port=port, timeout=self.timeout
+        )
 
     def _call(self, service_name, *args):
         self.__id_count += 1
@@ -179,7 +178,7 @@ class BaseProxy(object):
         logger.debug(f"[{self.public_url}] calling %s%s", service_name, args)
 
         headers = {
-            "Host": self.__url.hostname,
+            "Host": self._parsed_url.hostname,
             "User-Agent": DEFAULT_USER_AGENT,
             "Content-type": "application/json",
         }
@@ -187,9 +186,26 @@ class BaseProxy(object):
         if self.__auth_header is not None:
             headers["Authorization"] = self.__auth_header
 
-        self.__conn.request("POST", self.__url.path, postdata, headers)
+        path = self._parsed_url.path
+        tries = 5
+        backoff = 0.3
+        while tries:
+            try:
+                conn = self._getconn()
+                conn.request("POST", path, postdata, headers)
+            except (BlockingIOError, http.client.CannotSendRequest):
+                logger.exception(
+                    f"hit request error: {path}, {postdata}, {self._parsed_url}"
+                )
+                tries -= 1
+                if not tries:
+                    raise
+                time.sleep(backoff)
+                backoff *= 2
+            else:
+                break
 
-        response = self._get_response()
+        response = self._get_response(conn)
         err = response.get("error")
         if err is not None:
             if isinstance(err, dict):
@@ -205,8 +221,8 @@ class BaseProxy(object):
         else:
             return response["result"]
 
-    def _get_response(self):
-        http_response = self.__conn.getresponse()
+    def _get_response(self, conn):
+        http_response = conn.getresponse()
         if http_response is None:
             raise JSONRPCError(
                 {"code": -342, "message": "missing HTTP response from server"}
@@ -230,14 +246,6 @@ class BaseProxy(object):
                     ),
                 }
             )
-
-    def close(self):
-        if self.__conn is not None:
-            self.__conn.close()
-
-    def __del__(self):
-        if self.__conn is not None:
-            self.__conn.close()
 
 
 class RawProxy(BaseProxy):
