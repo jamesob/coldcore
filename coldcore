@@ -2,12 +2,15 @@
 """
 TODO
 
-- [ ] implement config
-- [ ] xpub storage
-- [ ] wizard
-- [ ] disable logging in ui command, log to file
+- [ ] curses control panel
+- [ ] add version birthday to new config
+- [ ] handle overflow in curses balance panel
+- [ ] port curses onboarding flow to non-curses
+- [ ] colorize UI
 - [ ] implement --json, --csv
 - [ ] implement command-on-monitor
+- [ ] allow manual coin selection when sending
+- [ ] address labeling
 
 To document:
 
@@ -28,6 +31,8 @@ import base64
 import datetime
 import subprocess
 import time
+import socket
+import threading
 import textwrap
 import json
 import io
@@ -323,9 +328,11 @@ import http.client as httplib
 import json
 import platform
 import urllib.parse as urlparse
+import socket
 import re
 import time
 import http.client
+import typing as t
 from typing import IO, Optional as Op
 from decimal import Decimal
 
@@ -372,37 +379,21 @@ class BaseProxy(object):
         self.timeout = timeout
         self.net_name = net_name
 
+        # Figure out the path to the bitcoin.conf file
+        if btc_conf_file is None:
+            if platform.system() == "Darwin":
+                btc_conf_file = os.path.expanduser(
+                    "~/Library/Application Support/Bitcoin/"
+                )
+            elif platform.system() == "Windows":
+                btc_conf_file = os.path.join(os.environ["APPDATA"], "Bitcoin")
+            else:
+                btc_conf_file = os.path.expanduser("~/.bitcoin")
+            btc_conf_file = os.path.join(btc_conf_file, "bitcoin.conf")
+
         if service_url is None:
-            # Figure out the path to the bitcoin.conf file
-            if btc_conf_file is None:
-                if platform.system() == "Darwin":
-                    btc_conf_file = os.path.expanduser(
-                        "~/Library/Application Support/Bitcoin/"
-                    )
-                elif platform.system() == "Windows":
-                    btc_conf_file = os.path.join(os.environ["APPDATA"], "Bitcoin")
-                else:
-                    btc_conf_file = os.path.expanduser("~/.bitcoin")
-                btc_conf_file = os.path.join(btc_conf_file, "bitcoin.conf")
-
             # Bitcoin Core accepts empty rpcuser, not specified in btc_conf_file
-            conf = {"rpcuser": ""}
-
-            # Extract contents of bitcoin.conf to build service_url
-            try:
-                with open(btc_conf_file, "r") as fd:
-                    for line in fd.readlines():
-                        if "#" in line:
-                            line = line[: line.index("#")]
-                        if "=" not in line:
-                            continue
-                        k, v = line.split("=", 1)
-                        conf[k.strip()] = v.strip()
-
-            # Treat a missing bitcoin.conf as though it were empty
-            except FileNotFoundError:
-                pass
-
+            conf = self._get_bitcoind_conf_from_filesystem(btc_conf_file)
             if service_port is None:
                 service_port = {
                     "mainnet": 8332,
@@ -413,37 +404,34 @@ class BaseProxy(object):
 
             service_url = f"http://{conf['rpchost']}:{conf['rpcport']}"
 
-            cookie_dir = conf.get("datadir", os.path.dirname(btc_conf_file))
-            if net_name != "mainnet":
-                cookie_dir = os.path.join(cookie_dir, net_name)
-            cookie_file = os.path.join(cookie_dir, ".cookie")
-            try:
-                with open(cookie_file, "r") as fd:
-                    authpair = fd.read()
-            except (IOError, FileNotFoundError) as err:
-                if "rpcpassword" in conf:
-                    authpair = "%s:%s" % (conf["rpcuser"], conf["rpcpassword"])
-                else:
-                    raise ValueError(
-                        "Cookie file unusable (%s) and rpcpassword not specified "
-                        "in the configuration file: %r" % (err, btc_conf_file)
-                    )
-
+            authpair = self._get_bitcoind_cookie_authpair(conf, btc_conf_file, net_name)
         else:
             url = urlparse.urlparse(service_url)
-            authpair = "%s:%s" % (url.username, url.password)
+            authpair = "%s:%s" % (url.username or "", url.password or "")
+
+            # Try and pull in auth information from the filesystem if it's missing.
+            if authpair == ":":
+                conf = self._get_bitcoind_conf_from_filesystem(btc_conf_file)
+                authpair = self._get_bitcoind_cookie_authpair(
+                    conf, btc_conf_file, net_name
+                )
+                logger.debug("pulling authpair from cookie despite intaking URL")
 
         if wallet_name:
+            service_url = service_url.rstrip("/")
             service_url += f"/wallet/{wallet_name}"
 
-        logger.info(f"SERVICE URL: {service_url}")
+        logger.info(f"Connecting to bitcoind: {service_url}")
         self.url = service_url
 
         # Credential redacted
         self.public_url = re.sub(r":[^/]+@", ":***@", self.url, 1)
         self._parsed_url = urlparse.urlparse(service_url)
+        self.host = self._parsed_url.hostname
 
         logger.info(f"Initializing RPC client at {self.public_url}")
+        # XXX keep for debugging, but don't ship:
+        # logger.info(f"[REMOVE THIS] USING AUTHPAIR {authpair}")
 
         if self._parsed_url.scheme not in ("http",):
             raise ValueError("Unsupported URL scheme %r" % self._parsed_url.scheme)
@@ -454,13 +442,62 @@ class BaseProxy(object):
         if authpair:
             self.__auth_header = b"Basic " + base64.b64encode(authpair.encode("utf8"))
 
-    def _getconn(self):
+    def _get_bitcoind_conf_from_filesystem(self, btc_conf_file: str) -> t.Dict:
+        conf = {"rpcuser": ""}
+
+        # Extract contents of bitcoin.conf to build service_url
+        try:
+            with open(btc_conf_file, "r") as fd:
+                for line in fd.readlines():
+                    if "#" in line:
+                        line = line[: line.index("#")]
+                    if "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    conf[k.strip()] = v.strip()
+
+        # Treat a missing bitcoin.conf as though it were empty
+        except FileNotFoundError:
+            pass
+
+        return conf
+
+    def _get_bitcoind_cookie_authpair(
+        self, conf: dict, btc_conf_file: str, net_name: str
+    ) -> t.Optional[str]:
+        """Get an authpair from the cookie or configuration files."""
+        authpair = ""
+        cookie_dir = conf.get("datadir", os.path.dirname(btc_conf_file))
+        if net_name != "mainnet":
+            cookie_dir = os.path.join(cookie_dir, net_name)
+        cookie_file = os.path.join(cookie_dir, ".cookie")
+        try:
+            with open(cookie_file, "r") as fd:
+                authpair = fd.read()
+                logger.debug("read authpair from cookie")
+        except (IOError, FileNotFoundError) as err:
+            logger.debug("couldn't read authpair from cookie", exc_info=True)
+            if "rpcpassword" in conf:
+                authpair = "%s:%s" % (conf["rpcuser"], conf["rpcpassword"])
+                logger.debug("read authpair from conf")
+            else:
+                raise ValueError(
+                    "Cookie file unusable (%s) and rpcpassword not specified "
+                    "in the configuration file: %r" % (err, btc_conf_file)
+                )
+
+        return authpair
+
+    @property
+    def port(self) -> int:
         if self._parsed_url.port is None:
-            port = httplib.HTTP_PORT
+            return httplib.HTTP_PORT
         else:
-            port = self._parsed_url.port
+            return self._parsed_url.port
+
+    def _getconn(self):
         return httplib.HTTPConnection(
-            self._parsed_url.hostname, port=port, timeout=self.timeout
+            self._parsed_url.hostname, port=self.port, timeout=self.timeout
         )
 
     def _call(self, service_name, *args):
@@ -493,7 +530,7 @@ class BaseProxy(object):
             try:
                 conn = self._getconn()
                 conn.request("POST", path, postdata, headers)
-            except (BlockingIOError, http.client.CannotSendRequest):
+            except (BlockingIOError, http.client.CannotSendRequest, socket.gaierror):
                 logger.exception(
                     f"hit request error: {path}, {postdata}, {self._parsed_url}"
                 )
@@ -530,7 +567,9 @@ class BaseProxy(object):
 
         rdata = http_response.read().decode("utf8")
         try:
-            return json.loads(rdata, parse_float=Decimal)
+            loaded = json.loads(rdata, parse_float=Decimal)
+            logger.debug(f"[{self.public_url}] -> {loaded}")
+            return loaded
         except Exception:
             raise JSONRPCError(
                 {
@@ -678,6 +717,10 @@ import typing as t
 import logging
 import time
 import subprocess
+import sys
+import threading
+import datetime
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from collections import namedtuple
@@ -687,11 +730,127 @@ from typing import Optional as Op
 logger = logging.getLogger("ui")
 
 colr = curses.color_pair
-bold = curses.A_BOLD
+curses_bold = curses.A_BOLD
+
+_use_color_no_tty = True
+
+
+def use_color():
+    if sys.stdout.isatty():
+        return True
+    if _use_color_no_tty:
+        return True
+    return False
+
+
+def esc(*codes: t.Union[int, str]) -> str:
+    """Produces an ANSI escape code from a list of integers
+    :rtype: text_type
+    """
+    return t_("\x1b[{}m").format(t_(";").join(t_(str(c)) for c in codes))
+
+
+def t_(b: t.Union[bytes, t.Any]) -> str:
+    """ensure text type"""
+    if isinstance(b, bytes):
+        return b.decode()
+    return b
+
+
+def b_(t: t.Union[str, t.Any]) -> bytes:
+    """ensure binary type"""
+    if isinstance(t, str):
+        return t.encode()
+    return t
+
+
+def check_line(msg: str) -> str:
+    return green(bold(" ✔  ")) + msg
+
+
+def warning_line(msg: str) -> str:
+    return red(bold(" !  ")) + msg
+
+
+def info_line(msg: str) -> str:
+    return bold(" □  ") + msg
+
+
+def conn_line(msg: str) -> str:
+    return green(bold(" ○  ")) + msg
+
+
+###############################################################################
+# 8 bit Color
+###############################################################################
+
+
+def make_color(start, end: str) -> t.Callable[[str], str]:
+    def color_func(s: str) -> str:
+        if not use_color():
+            return s
+
+        # render
+        return start + t_(s) + end
+
+    return color_func
+
+
+# According to https://en.wikipedia.org/wiki/ANSI_escape_code#graphics ,
+# 39 is reset for foreground, 49 is reset for background, 0 is reset for all
+# we can use 0 for convenience, but it will make color combination behaves weird.
+END = esc(0)
+
+FG_END = esc(39)
+black = make_color(esc(30), FG_END)
+red = make_color(esc(31), FG_END)
+green = make_color(esc(32), FG_END)
+yellow = make_color(esc(33), FG_END)
+blue = make_color(esc(34), FG_END)
+magenta = make_color(esc(35), FG_END)
+cyan = make_color(esc(36), FG_END)
+white = make_color(esc(37), FG_END)
+gray = make_color(esc(90), FG_END)
+
+BG_END = esc(49)
+black_bg = make_color(esc(40), BG_END)
+red_bg = make_color(esc(41), BG_END)
+green_bg = make_color(esc(42), BG_END)
+yellow_bg = make_color(esc(43), BG_END)
+blue_bg = make_color(esc(44), BG_END)
+magenta_bg = make_color(esc(45), BG_END)
+cyan_bg = make_color(esc(46), BG_END)
+white_bg = make_color(esc(47), BG_END)
+
+HL_END = esc(22, 27, 39)
+
+black_hl = make_color(esc(1, 30, 7), HL_END)
+red_hl = make_color(esc(1, 31, 7), HL_END)
+green_hl = make_color(esc(1, 32, 7), HL_END)
+yellow_hl = make_color(esc(1, 33, 7), HL_END)
+blue_hl = make_color(esc(1, 34, 7), HL_END)
+magenta_hl = make_color(esc(1, 35, 7), HL_END)
+cyan_hl = make_color(esc(1, 36, 7), HL_END)
+white_hl = make_color(esc(1, 37, 7), HL_END)
+
+bold = make_color(esc(1), esc(22))
+italic = make_color(esc(3), esc(23))
+underline = make_color(esc(4), esc(24))
+strike = make_color(esc(9), esc(29))
+blink = make_color(esc(5), esc(25))
 
 
 class Action:
     pass
+
+
+class Spinner:
+    def __init__(self):
+        self.i = -1
+
+    def spin(self) -> str:
+        self.i += 1
+        return ["◰", "◳", "◲", "◱"][self.i % 4]
 
 
 class Scene:
@@ -715,13 +874,13 @@ class HomeScene(Scene):
         super().__init__()
 
         self.setup_item = MenuItem(0, "start setup", GoSetup)
-        self.monitor_item = MenuItem(1, "monitor wallet", GoHome)
+        self.dashboard_item = MenuItem(1, "dashboard", GoDashboard)
         self.send_item = MenuItem(2, "send", GoHome)
         self.recieve_item = MenuItem(3, "receive", GoHome)
 
         self.mitems = [
             self.setup_item,
-            self.monitor_item,
+            self.dashboard_item,
             self.send_item,
             self.recieve_item,
         ]
@@ -777,7 +936,7 @@ class HomeScene(Scene):
         start_x_subtitle = int((width // 2) - (len(subtitle) // 2) - len(subtitle) % 2)
         start_x_keystr = int((width // 2) - (len(keystr) // 2) - len(keystr) % 2)
 
-        with attrs(scr, colr(2), bold):
+        with attrs(scr, colr(2), curses_bold):
             scr.addstr(start_y, width // 2, title)
 
         scr.addstr(start_y + title_height, start_x_subtitle, subtitle[:width])
@@ -797,7 +956,7 @@ class HomeScene(Scene):
             scr.addstr(start_y + title_height + 8 + idx, half, start_str[:width])
 
         menu_option(*self.setup_item.args(self.mchoice))
-        menu_option(*self.monitor_item.args(self.mchoice))
+        menu_option(*self.dashboard_item.args(self.mchoice))
         menu_option(*self.send_item.args(self.mchoice))
         menu_option(*self.recieve_item.args(self.mchoice))
 
@@ -886,7 +1045,7 @@ class SetupScene(Scene):
             for line in title.splitlines()
         )
 
-        with attrs(scr, colr(2), bold):
+        with attrs(scr, colr(2), curses_bold):
             scr.addstr(y_start, x_start, title)
 
         def wait():
@@ -1082,7 +1241,7 @@ class SetupScene(Scene):
                 f"Found a balance of {bal} BTC, earliest height: "
                 f"{self.scan_from_height}",
                 colr(5),
-                bold,
+                curses_bold,
                 ypos=scan_y,
             )
         else:
@@ -1131,9 +1290,11 @@ class SetupScene(Scene):
 
         self.new_step_line("Send a tiny test amount to")
         self.new_step_line("")
-        self.new_step_line(f"    {self.testaddress1}", colr(2), bold)
+        self.new_step_line(f"    {self.testaddress1}", colr(2), curses_bold)
         self.new_step_line("")
-        (waity, waitx) = self.new_step_line("Waiting for transaction", colr(4), bold)
+        (waity, waitx) = self.new_step_line(
+            "Waiting for transaction", colr(4), curses_bold
+        )
 
         if not self.receive_utxo1:
             scr.addstr(waity, waitx + 1, self._get_scroller())
@@ -1150,7 +1311,7 @@ class SetupScene(Scene):
             f"Received amount of {self.receive_utxo1.amount} "
             f"({self.receive_utxo1.txid[:8]})",
             colr(5),
-            bold,
+            curses_bold,
             ypos=waity,
         )
         green_check(scr, testy, check_xpos)
@@ -1196,7 +1357,7 @@ class SetupScene(Scene):
         signed_filename = self.prepared_tx.replace(".psbt", "-signed.psbt")
 
         (wait2y, wait2x) = self.new_step_line(
-            f"Waiting for the signed file ({signed_filename})", colr(4), bold
+            f"Waiting for the signed file ({signed_filename})", colr(4), curses_bold
         )
 
         filepath = Path(signed_filename)
@@ -1207,15 +1368,15 @@ class SetupScene(Scene):
             rpcw = self.config.rpc(self.cc_wallet)
             self.test_tx_hex = self.controller.psbt_to_tx_hex(rpcw, filepath)
 
-        self.new_step_line("Cool, got the signed PSBT!", colr(6), bold)
+        self.new_step_line("Cool, got the signed PSBT!", colr(6), curses_bold)
 
         if not self.test_tx_info:
             rpcw = self.config.rpc(self.cc_wallet)
             self.test_tx_info = _get_tx_info(rpcw, self.test_tx_hex)
 
         assert len(self.test_tx_info) == 2
-        self.new_step_line(f"  {self.test_tx_info[0]}", colr(0), bold)
-        self.new_step_line("Confirm send? [y/n]", colr(2), bold)
+        self.new_step_line(f"  {self.test_tx_info[0]}", colr(0), curses_bold)
+        self.new_step_line("Confirm send? [y/n]", colr(2), curses_bold)
 
         if not self.confirm_send:
             if key_y(k):
@@ -1224,8 +1385,10 @@ class SetupScene(Scene):
             else:
                 return wait()
 
-        self.new_step_line("Transaction broadcast!", colr(2), bold)
-        (waity2, waitx2) = self.new_step_line("Waiting for transaction", colr(4), bold)
+        self.new_step_line("Transaction broadcast!", colr(2), curses_bold)
+        (waity2, waitx2) = self.new_step_line(
+            "Waiting for transaction", colr(4), curses_bold
+        )
 
         if not self.receive_utxo2:
             scr.addstr(waity2, waitx2 + 1, self._get_scroller())
@@ -1242,12 +1405,14 @@ class SetupScene(Scene):
             f"Received amount of {self.receive_utxo2.amount} "
             f"({self.receive_utxo2.txid[:8]})",
             colr(5),
-            bold,
+            curses_bold,
             ypos=waity,
         )
         green_check(scr, testy, check_xpos)
 
-        self.new_step_line("Your wallet is good to go! Press q to exit.", colr(5), bold)
+        self.new_step_line(
+            "Your wallet is good to go! Press q to exit.", colr(5), curses_bold
+        )
 
         scr.move(self.height - 1, self.width - 1)
         # Refresh the screen
@@ -1297,12 +1462,12 @@ def draw_onboard(k: int) -> Action:
 
 
 def green_check(scr, y, x):
-    with attrs(scr, colr(5), bold):
+    with attrs(scr, colr(5), curses_bold):
         scr.addstr(y, x, "✔")
 
 
 def box(scr, y, x):
-    with attrs(scr, colr(2), bold):
+    with attrs(scr, colr(2), curses_bold):
         scr.addstr(y, x, "□")
 
 
@@ -1310,8 +1475,260 @@ def key_y(k: int):
     return k in {ord("y"), ord("Y"), 10, 13, curses.KEY_ENTER}
 
 
+def _s(window, y, x, msg, attr=0):
+    """A width-safe version of addstr."""
+    (_, width) = window.getmaxyx()
+    window.addstr(y, x, msg[:width], attr)
+
+
+class DashboardScene(Scene):
+    def __init__(self):
+        self.utxos = {}
+        self.threads = []
+        self.threads_started = False
+        self.new_addrs = []
+        self.blocks = []
+
+        self.conn_status = None
+        self.loop_count = 0
+
+    def start_threads(self):
+        if self.threads_started:
+            return
+
+        wall = self.wallet_configs[0]
+        t1 = threading.Thread(
+            target=_get_utxo_lines,
+            args=(self.config.rpc(wall), self.controller, self.utxos),
+        )
+        t1.start()
+        self.threads.append(t1)
+
+        t2 = threading.Thread(
+            target=_get_new_blocks,
+            args=(self.config.rpc(), self.blocks),
+        )
+        t2.start()
+        self.threads.append(t2)
+
+        self.threads_started = True
+        self.rpc = self.config.rpc()
+
+    def stop_threads(self):
+        stop_threads_event.set()
+        for thread in self.threads:
+            thread.join()
+
+    def draw(self, k: int) -> t.Tuple[int, Action]:
+        try:
+            return self._draw(k)
+        except Exception:
+            logger.exception("Dashboard curses barfed")
+            self.stop_threads()
+            raise
+
+        return (ord("q"), GoHome)
+
+    def _draw(self, k: int) -> t.Tuple[int, Action]:
+        scr = self.scr
+        self.height, self.width = scr.getmaxyx()
+        wall = self.wallet_configs[0]
+
+        substartx = 3
+        substarty = 2
+        sub_height = int(self.height * 0.45)
+
+        balwidth = max(int(self.width * 0.5), 61)
+        addrwidth = max(int(self.width * 0.4), 24)
+
+        self.start_threads()
+
+        self.balance_win = scr.derwin(sub_height, balwidth, substarty, substartx)
+        self.balance_win.border()
+        _s(self.balance_win, 0, 2, " UTXOs ")
+
+        _s(
+            self.balance_win,
+            2,
+            2,
+            f"{'address':<44}{'confs':>10}{'BTC':>12}",
+        )
+
+        with utxos_lock:
+            starty = 2
+            startx = 2
+            max_lines = sub_height - 2
+
+            _s(self.balance_win, starty, startx, "")
+            starty += 1
+
+            if max_lines < len(self.utxos):
+                _s(
+                    self.balance_win,
+                    starty,
+                    startx,
+                    "-- too many UTXOs to fit --",
+                    curses.A_BOLD,
+                )
+                starty += 1
+
+            sorted_utxos = sorted(self.utxos.values(), key=lambda u: -u.num_confs)[
+                -max_lines:
+            ]
+            total_bal = f"{sum([u.amount for u in sorted_utxos])}"
+            i = 0
+
+            for u in sorted_utxos:
+                line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
+                attrslist = []
+
+                if u.num_confs < 6:
+                    attrslist.extend([colr(3), curses_bold])
+
+                with attrs(self.balance_win, *attrslist):
+                    _s(self.balance_win, starty + i, startx, line)
+
+                i += 1
+
+            _s(
+                self.balance_win,
+                starty + i + 1,
+                startx,
+                f"{' ':<54}{total_bal:>12}",
+                curses.A_BOLD,
+            )
+
+        if k == ord("n"):
+            if len(self.new_addrs) < 10:
+                rpcw = self.config.rpc(wall)
+                self.new_addrs.append(rpcw.getnewaddress())
+
+        self.address_win = scr.derwin(
+            sub_height, addrwidth, substarty, substartx + balwidth + 1
+        )
+        self.address_win.box()
+        _s(self.address_win, 0, 2, " addresses ")
+        _s(self.address_win, 2, 2, "press 'n' to get new address", curses.A_ITALIC)
+
+        with utxos_lock:
+            utxo_addrs = {u.address for u in self.utxos.values()}
+            # Strip out used addresses.
+            self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
+
+            for i, addr in enumerate(self.new_addrs):
+                _s(self.address_win, 3 + i, 2, addr)
+
+        chainwin_height = int(self.height * 0.25)
+        chainwin_width = int(self.width * 0.9)
+
+        self.chain_win = scr.derwin(
+            chainwin_height, chainwin_width, substarty + sub_height, substartx
+        )
+        self.chain_win.box()
+        _s(self.chain_win, 0, 2, " chain status ")
+
+        max_history = chainwin_height - 4
+
+        if not self.conn_status or self.loop_count % 20 == 0:
+            try:
+                rpc = self.config.rpc()
+                netinfo = self.rpc.getnetworkinfo()
+            except Exception:
+                self.conn_status = warning_line("! couldn't connect to Bitcoin Core")
+            else:
+                ver = netinfo["subversion"].strip("/")
+                self.conn_status = (
+                    f"✔ connected to version {ver} at {rpc.host}:{rpc.port}"
+                )
+
+        _s(self.chain_win, 2, 3, self.conn_status)
+
+        with blocks_lock:
+            for i, b in enumerate(self.blocks[-max_history:]):
+                blockstr = (
+                    f"{b.time_saw} | block {b.height} (...{b.hash[-8:]}) - "
+                    f"{b.median_fee} sat/B - "
+                    f"{b.txs} txs - "
+                    f"subsidy: {b.subsidy / 100_000_000}"
+                )
+                _s(self.chain_win, 4 + i, 3, blockstr[:chainwin_width])
+
+        scr.refresh()
+
+        # scr.move(self.width, self.height)
+
+        scr.timeout(400)
+        next_k = scr.getch()
+        self.loop_count += 1
+
+        if next_k == ord("q"):
+            self.stop_threads()
+
+        return (next_k, GoDashboard)
+
+
+@dataclass
+class Block:
+    hash: str
+    height: int
+    time_saw: datetime.datetime
+    median_fee: float
+    subsidy: float
+    txs: int
+
+
+stop_threads_event = threading.Event()
+utxos_lock = threading.Lock()
+blocks_lock = threading.Lock()
+
+
+def _get_new_blocks(rpc, blocks):
+    last_saw = None
+
+    while True:
+        saw = rpc.getbestblockhash()
+
+        if saw != last_saw:
+            stats = rpc.getblockstats(saw)
+            with blocks_lock:
+                blocks.append(
+                    Block(
+                        saw,
+                        stats["height"],
+                        datetime.datetime.now(),
+                        stats["feerate_percentiles"][2],
+                        stats["subsidy"],
+                        stats["txs"],
+                    )
+                )
+            last_saw = saw
+
+        time.sleep(1)
+
+        if stop_threads_event.is_set():
+            return
+
+
+def _get_utxo_lines(rpcw, controller, utxos):
+    """
+    Poll constantly for new UTXOs.
+    """
+    while True:
+        new_utxos = controller.get_utxos(rpcw)
+
+        with utxos_lock:
+            utxos.clear()
+            utxos.update(new_utxos)
+
+        time.sleep(1)
+
+        if stop_threads_event.is_set():
+            return
+
+
 GoHome = Action()
 GoSetup = Action()
+GoDashboard = Action()
 Quit = Action()
 
 
@@ -1335,6 +1752,9 @@ def draw_menu(scr, config, wallet_configs):
     setup = SetupScene()
     setup.set_configs(scr, config, wallet_configs)
 
+    dashboard = DashboardScene()
+    dashboard.set_configs(scr, config, wallet_configs)
+
     action = GoHome
     k = 0
 
@@ -1344,14 +1764,13 @@ def draw_menu(scr, config, wallet_configs):
         height, width = scr.getmaxyx()
 
         # FIXME
-        scene = "h o m e"
 
         try:
             kstr = curses.keyname(k).decode()
         except ValueError:
             kstr = "???"
 
-        statusbarstr = f"Press 'q' to exit | {scene} | last keypress: {kstr} ({k})"
+        statusbarstr = f"Press 'q' to exit | never sell | last keypress: {kstr} ({k})"
         if k == -1:
             statusbarstr += " | waiting"
         # Render status bar
@@ -1371,6 +1790,8 @@ def draw_menu(scr, config, wallet_configs):
             (k, action) = home.draw(k)
         elif action == GoSetup:
             (k, action) = setup.draw(k)
+        elif action == GoDashboard:
+            (k, action) = dashboard.draw(k)
 
         if k == ord("q") or action == Quit:
             break
@@ -1393,7 +1814,17 @@ def start_ui(config, wallet_configs):
     curses.wrapper(draw_menu, config, wallet_configs)
 
 
+    start_ui,
+    Spinner,
+    check_line,
+    warning_line,
+    info_line,
+    yellow,
+    bold,
+    conn_line,
+)
 
+__VERSION__ = "0.1.0-alpha"
 
 root_logger = logging.getLogger()
 logger = logging.getLogger("main")
@@ -1423,11 +1854,28 @@ cli.add_arg(
     default=False,
     help="Try to connect on the testnet network initially instead of mainnet.",
 )
+cli.add_arg(
+    "--version",
+    action="version",
+    version=f"coldcore {__VERSION__}",
+)
+cli.add_arg(
+    "--wallet",
+    "-w",
+    action="store",
+    default=None,
+    help="The specific wallet to open.",
+)
 
-
-CONFIG_DIR = Path.home() / ".config" / "coldcore"
-DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.ini"
 PASS_PREFIX = "pass:"
+
+
+def _err(s: str):
+    print(s, file=sys.stderr, flush=True)
+
+
+def _warn(s: str):
+    print(warning_line(s), file=sys.stderr, flush=True)
 
 
 def setup_logging() -> Op[Path]:
@@ -1463,8 +1911,13 @@ class Wallet:
     fingerprint: str
     deriv_path: str
     xpub: str
+
+    # The name of the watch-only wallet stored in Bitcoin Core.
+    bitcoind_name: str
+
     # TODO at some point we'll support non-WPKH descriptors.
     descriptors: t.List["WpkhDescriptor"] = field(default_factory=list)
+
     earliest_block: Op[int] = None
     bitcoind_json_url: Op[str] = None
 
@@ -1474,6 +1927,10 @@ class Wallet:
 
     @property
     def name(self):
+        """
+        The coldcore name of the wallet; not necessarily the name of what is
+        stored in bitcoind.
+        """
         raise NotImplementedError
 
     @property
@@ -1527,6 +1984,7 @@ class Wallet:
             "fingerprint": self.fingerprint,
             "deriv_path": self.deriv_path,
             "xpub": self.xpub,
+            "bitcoind_name": self.bitcoind_name,
             "bitcoind_json_url": self.bitcoind_json_url or "",
             "earliest_block": str(self.earliest_block or ""),
             "checksum_map": json.dumps(checksums),
@@ -1544,10 +2002,10 @@ class Wallet:
         load_from = this_conf.get("load_from")
 
         if load_from:
-            content = ""
-            if load_from.startswith(PASS_PREFIX):
+            content: Op[str] = ""
+            if _is_pass_path(load_from):
                 passpath = load_from.split(PASS_PREFIX, 1)[-1]
-                content = Pass().read(passpath)  # type: ignore
+                content = Pass().read(passpath, action=f"Requesting wallet {name})")
             elif load_from.endswith(".gpg"):
                 content = GPG().read(load_from)  # type: ignore
             else:
@@ -1557,11 +2015,19 @@ class Wallet:
                 raise ValueError(f"failed to retrieve config from {load_from}")
 
             conf2 = ConfigParser()
-            conf2.read_string(content)
+            try:
+                conf2.read_string(content)
+            except Exception:
+                msg = f"Failed to read config for wallet {name} ({load_from})"
+                logger.exception(msg)
+                _err(msg)
+                sys.exit(1)
+
             this_conf = conf2[name]
 
         fp = this_conf["fingerprint"]
         deriv_path = this_conf["deriv_path"]
+        bitcoind_name = this_conf["bitcoind_name"]
         xpub = this_conf["xpub"]
         checksum_map = json.loads(this_conf["checksum_map"])
         url = this_conf.get("bitcoind_json_url")
@@ -1584,7 +2050,14 @@ class Wallet:
         ]
 
         return cls(
-            fp, deriv_path, xpub, descs, earliest_block, url, loaded_from=load_from
+            fp,
+            deriv_path,
+            xpub,
+            bitcoind_name,
+            descs,
+            earliest_block,
+            url,
+            loaded_from=load_from,
         )
 
 
@@ -1676,6 +2149,7 @@ class CCWallet(Wallet):
             fp,
             deriv_path,
             xpub,
+            f"coldcard-{fp.lower()}",
             descriptors=descs,
             earliest_block=earliest_block,
         )
@@ -1759,18 +2233,81 @@ class WizardController:
         return _psbt_to_tx_hex(*args, **kwargs)
 
 
-def discover_rpc(config: "GlobalConfig") -> Op[BitcoinRPC]:
+def discover_rpc(
+    config: Op["GlobalConfig"] = None, url: Op[str] = None
+) -> Op[BitcoinRPC]:
     """Return an RPC connection to Bitcoin if possible."""
+    service_url = None
+    if config:
+        service_url = config.bitcoind_json_url
+    elif url:
+        service_url = url
+
     for i in (MAINNET, TESTNET):
         try:
-            logger.info(f"trying RPC for {i}")
-            rpc = config.rpc(net_name=i)
+            logger.info(f"trying RPC for {i} at {service_url}")
+            rpc = get_rpc(service_url, net_name=i)
             rpc.help()
+            logger.info(f"found RPC connection at {rpc.url}")
         except Exception:
-            pass
+            logger.debug("couldn't connect to Core RPC", exc_info=True)
         else:
             return rpc
     return None
+
+
+def get_rpc(
+    url: Op[str] = None,
+    wallet: Op[Wallet] = None,
+    quiet: bool = False,
+    **kwargs,
+) -> BitcoinRPC:
+    """
+    Get a connection to some Bitcoin JSON RPC server. Handles connection caching.
+
+    If connecting to a wallet, ensure the wallet is loaded.
+    """
+    if not hasattr(get_rpc, "_rpc_cache"):
+        setattr(get_rpc, "_rpc_cache", {})
+    cache = get_rpc._rpc_cache  # type: ignore
+
+    wallet_name = wallet.name if wallet else ""
+
+    if wallet_name in cache:
+        return cache[wallet_name]
+
+    if not wallet:
+        got = _get_rpc_inner(url, **kwargs)
+        cache[wallet_name] = got
+        if not quiet:
+            hoststr = yellow(f"{got.host}:{got.port}")
+            _err(conn_line(f"connected to Bitcoin Core at {hoststr}"))
+    else:
+        plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
+        try:
+            # We have to ensure the wallet is loaded before accessing its
+            # RPC.
+            plain_rpc.loadwallet(wallet.name)
+        except JSONRPCError as e:
+            # Wallet already loaded.
+            if e.error.get("code") != -4:  # type: ignore
+                raise
+        cache[wallet_name] = _get_rpc_inner(
+            url, net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
+        )
+
+    return cache[wallet_name]
+
+
+def _get_rpc_inner(
+    url: Op[str] = None, timeout: int = (60 * 5), **kwargs
+) -> BitcoinRPC:
+    return BitcoinRPC(
+        url,
+        timeout=timeout,
+        debug_stream=(sys.stderr if cli.args.debug else None),
+        **kwargs,
+    )
 
 
 @dataclass
@@ -1794,63 +2331,25 @@ class GlobalConfig:
     # See: gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
     gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
 
-    try_testnet: bool = False
+    def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
+        return get_rpc(self.bitcoind_json_url, wallet, **kwargs)
 
-    _rpc_cache: t.Dict[str, BitcoinRPC] = field(default_factory=dict)
+    def info(self, *args, **kwargs):
+        if not self.disable_echo:
+            print(*args, file=self.stderr, flush=True, **kwargs)
 
     def echo(self, *args, **kwargs):
         if not self.disable_echo:
-            print(*args, file=self.stdout, **kwargs)
+            print(*args, file=self.stdout, flush=True, **kwargs)
 
     def err(self, *args, **kwargs):
         if not self.disable_echo:
-            print(*args, file=self.stderr, **kwargs)
+            print(*args, file=self.stderr, flush=True, **kwargs)
+        logger.warning(*args, **kwargs)
 
     def exit(self, code):
         # To be overridden in unittests.
         sys.exit(code)
-
-    def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
-        wallet_name = wallet.name if wallet else ""
-
-        if wallet_name in self._rpc_cache:
-            return self._rpc_cache[wallet_name]
-
-        if not wallet:
-            self._rpc_cache[wallet_name] = self._rpc(**kwargs)
-        else:
-            plain_rpc = self._rpc(net_name=wallet.net_name, **kwargs)
-            try:
-                # We have to ensure the wallet is loaded before accessing its
-                # RPC.
-                plain_rpc.loadwallet(wallet.name)
-            except JSONRPCError as e:
-                # Wallet already loaded.
-                if e.error.get("code") != -4:  # type: ignore
-                    raise
-            self._rpc_cache[wallet_name] = self._rpc(
-                net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
-            )
-        return self._rpc_cache[wallet_name]
-
-    def _rpc(self, timeout: int = (60 * 5), **kwargs) -> BitcoinRPC:
-        kwargs.setdefault("net_name", TESTNET if self.try_testnet else MAINNET)
-        try:
-            return BitcoinRPC(
-                self.bitcoind_json_url,
-                timeout=timeout,
-                debug_stream=(sys.stderr if cli.args.debug else None),
-                **kwargs,
-            )
-        except Exception:
-            logger.exception("failed to connect to bitcoin core JSON RPC server")
-            # self.err(f"Hit error connecting to Bitcoin Core: '{str(e)}'")
-            self.err(
-                "Unable to connect to Bitcoin Core. Is it running and configured "
-                "to offer an RPC server? "
-                "See: https://en.bitcoin.it/wiki/API_reference_(JSON-RPC)"
-            )
-            sys.exit(1)
 
     @classmethod
     def from_ini(
@@ -1860,9 +2359,8 @@ class GlobalConfig:
         c = cls(
             loaded_from,
             conf,
-            sect.get("bitcoind_json_url", None),
+            sect.get("bitcoind_json_url"),
             sect.get("default_wallet"),
-            try_testnet=cli.args.testnet,
         )
         wallets = []
 
@@ -1889,27 +2387,10 @@ class GlobalConfig:
 
         return (c, wallets)
 
-    BLANK_CONF = textwrap.dedent(
-        """
-        [default]
-
-        # If blank, this will default to something like
-        #   http://localhost:8332
-        # You can specify non-localhosts like
-        #   http://your_rpc_user:rpcpassword@some_host:8332/
-        bitcoind_json_url =
-
-        # This corresponds to one of the wallet sections listed below,
-        # and will be used for commands where a single wallet is required
-        # but unspecified.
-        default_wallet =
-        """
-    )
-
     @classmethod
-    def write_blank(cls, outfile: t.IO):
+    def write_blank(cls, outfile: t.IO, bitcoind_json_url: Op[str] = ""):
         """Write a blank configuration file."""
-        outfile.write(cls.BLANK_CONF)
+        outfile.write(_get_blank_conf(bitcoind_json_url))
         p = Path(outfile.name)
 
         # Ensure that the created file is only readable by the owner.
@@ -1923,7 +2404,7 @@ class GlobalConfig:
 
     def write(self):
         """Save the contents of this config to an INI file on disk."""
-        if self.loaded_from.startswith(PASS_PREFIX):
+        if _is_pass_path(self.loaded_from):
             to_path = self.loaded_from.split(PASS_PREFIX)[-1]
             passobj = Pass()
             content = io.StringIO()
@@ -1945,6 +2426,25 @@ class GlobalConfig:
         logger.info(f"Wrote configuration to {self.loaded_from}")
 
 
+def _get_blank_conf(bitcoind_json_url: Op[str] = "") -> str:
+    return textwrap.dedent(
+        f"""
+        [default]
+
+        # If blank, this will default to something like
+        #   http://localhost:8332
+        # You can specify non-localhosts like
+        #   http://your_rpc_user:rpcpassword@some_host:8332/
+        bitcoind_json_url = {bitcoind_json_url or ''}
+
+        # This corresponds to one of the wallet sections listed below,
+        # and will be used for commands where a single wallet is required
+        # but unspecified.
+        default_wallet =
+        """
+    )
+
+
 def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
     """Return (returncode, stdout as bytes)."""
     kwargs["shell"] = True
@@ -1960,7 +2460,7 @@ def _sh(*args, **kwargs) -> subprocess.CompletedProcess:
 
 def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
     try:
-        rpc.createwallet(wall.name, True)
+        rpc.createwallet(wall.bitcoind_name, True)
     except JSONRPCError as e:
         if e.error.get("code") != -4:  # type: ignore
             # Wallet already exists; ok.
@@ -1990,13 +2490,11 @@ def _prepare_send(
 
         for addr in unknown_addrs:
             # TODO should fail?
-            config.echo(f"WARNING: address '{addr}' not in wallet")
+            _warn(f"WARNING: address '{addr}' not in wallet")
 
         for u in utxos:
             if u.address in spend_from:
                 vins.append({"txid": u.txid, "vout": u.vout})
-
-    # Check to see if we own this address with getaddressinfo
 
     try:
         result = rpcw.walletcreatefundedpsbt(
@@ -2009,7 +2507,7 @@ def _prepare_send(
     except Exception as e:
         # error code: -5 indicates bad address; handle that.
         if e.error.get("code") == -5:  # type: ignore
-            config.echo(f"Bad address specified: {e}")
+            config.info(f"Bad address specified: {e}")
             return False
         raise
 
@@ -2062,7 +2560,7 @@ def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> 
         addrs = ",".join(out["scriptPubKey"]["addresses"])
         outs.append((addrs, out["value"]))
 
-    config.echo("About to send a transaction:\n")
+    config.info("About to send a transaction:\n")
     for o in outs:
         try:
             addr_info = rpcw.getaddressinfo(o[0])
@@ -2072,9 +2570,9 @@ def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> 
 
         yours = addr_info["ismine"] or addr_info["iswatchonly"]
         yours_str = "  (your address)" if yours else ""
-        config.echo(f" -> {o[0]}  ({o[1]} BTC){yours_str}")
+        config.info(f" -> {o[0]}  ({o[1]} BTC){yours_str}")
 
-    config.echo("\n")
+    config.info("\n")
 
     inp = input("Look okay? [y/N]: ").strip().lower()
 
@@ -2084,7 +2582,7 @@ def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> 
 
 
 def _broadcast(config: GlobalConfig, rpcw: BitcoinRPC, tx_hex: str):
-    config.echo(rpcw.sendrawtransaction(tx_hex))
+    config.info(rpcw.sendrawtransaction(tx_hex))
 
 
 def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
@@ -2100,43 +2598,114 @@ def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
 
 
 @cli.cmd
-def setup(public_wallet_data: str):
+def setup(public_wallet_data: str, rpc_url: str = ""):
     """
-    Run initial setup for a wallet.
+    Run initial setup for a wallet. This creates the local configuration file (if
+    one doesn't already exist) and populates a watch-only wallet in Core.
 
     Args:
         public_wallet_data: path to Coldcard's public.txt or '-' to read from stdin
+        rpc_url: URL to Bitcoin Core JSON RPC, e.g. 'http://user:pass@host:8332'
     """
-    # TODO allow passing bitcoin core RPC addr
-    (config, _) = _get_config()
+    rpc = discover_rpc(url=rpc_url)
+
+    if not rpc:
+        _warn("Bitcoin Core JSON RPC server could not be detected")
+        _warn("Please ensure you are running Bitcoin Core locally, or pass an RPC")
+        _warn("address like '--bitcoind-rpc-url http://user:pass@host:8332'.")
+        sys.exit(1)
+
+    (config, _) = _get_config(bitcoind_json_url=rpc.url, require_wallets=False)
     rpc = config.rpc()
 
     wall = _wallet_from_input(public_wallet_data, rpc)
-    rpcw = config.rpc(wall)
 
-    config.echo(f"Adding new wallet '{wall.name}' to config at '{config.loaded_from}'")
+    config.info(
+        check_line(
+            f"Adding new wallet '{wall.name}' to config at '{config.loaded_from}'"
+        )
+    )
     config.add_new_wallet(wall)
     config.write()
 
     rpc_wallet_create(rpc, wall)
-    config.echo(rpcw.importmulti(*wall.importmulti_args()))
+
+    rpcw = config.rpc(wall)
+    import_res = rpcw.importmulti(*wall.importmulti_args())
+
+    if not all(i["success"] for i in import_res):
+        config.err(
+            f"Warning: failed to import some descriptors into Core: {import_res}"
+        )
 
     rpcw = config.rpc(wall, timeout=10000)
-    config.echo("Scanning the UTXO set...")
-    scan_results = rpcw.scantxoutset(*wall.scantxoutset_args())
+    scan_result = {}  # type: ignore
+    scan_thread = threading.Thread(
+        target=_run_scantxoutset,
+        args=(config.rpc(wall), wall.scantxoutset_args(), scan_result),
+    )
+    scan_thread.start()
+    spinner = Spinner()
 
-    unspents = scan_results["unspents"]
+    while scan_thread.is_alive():
+        sys.stderr.write(
+            f"\r {spinner.spin()}  -> scanning the UTXO set for balance [few minutes] ",
+        )
+        time.sleep(0.2)
+
+    config.info("\n" + check_line("Scan of UTXO set complete!"))
+
+    unspents = scan_result["result"]["unspents"]
     bal = sum([i["amount"] for i in unspents])
-    config.echo(f"Found an existing balance of {bal} BTC across {len(unspents)} UTXOs")
+    bal_str = yellow(bold(f"{bal} BTC"))
+    bal_count = yellow(bold(f"{len(unspents)} UTXOs"))
+    config.info(
+        check_line(f"Found an existing balance of {bal_str} across {bal_count}")
+    )
 
     rescan_begin_height = min([i["height"] for i in unspents])
-    config.echo(
-        f"Beginning chain rescan from {rescan_begin_height}. "
-        "This will take minutes to hours."
+    config.info(
+        info_line(
+            f"Beginning chain rescan from {rescan_begin_height} [minutes to hours]"
+        )
     )
-    config.echo(rpcw.rescanblockchain(rescan_begin_height))
-    # TODO: above call will block. run in thread and poll with getwalletinfo.
+    rescan_thread = threading.Thread(
+        target=_run_rescan, args=(config.rpc(wall), rescan_begin_height), daemon=True
+    )
+    rescan_thread.start()
+
+    time.sleep(1)
+
+    scan_info = rpcw.getwalletinfo()["scanning"]
+    spinner = Spinner()
+
+    while scan_info:
+        sys.stdout.write(
+            f"\r {spinner.spin()} scan progress: {scan_info['progress'] * 100:.2f}%   "
+        )
+        time.sleep(0.5)
+        scan_info = rpcw.getwalletinfo()["scanning"]
+
+    name = yellow(bold(wall.name))
+    config.info("\n" + check_line(f"Scan complete. Wallet {name} ready to use.\n"))
+    config.info(
+        info_line(f"Hint: check out your UTXOs with `coldcore -w {wall.name} balance`")
+    )
     return True
+
+
+def _run_scantxoutset(rpcw: BitcoinRPC, args, result):
+    try:
+        result["result"] = rpcw.scantxoutset(*args)
+    except socket.timeout:
+        logger.exception("socket timed out during txoutsetscan (this is expected)")
+
+
+def _run_rescan(rpcw: BitcoinRPC, begin_height: int):
+    try:
+        rpcw.rescanblockchain(begin_height)
+    except socket.timeout:
+        logger.exception("socket timed out during rescan (this is expected)")
 
 
 @cli.cmd
@@ -2242,6 +2811,7 @@ class Pass:
     def write(cls, path: str, content: str) -> bool:
         """Return True if write successful."""
         # TODO maybe detect whether or not we're overwriting and warn
+        _err(f"Requesting to write to pass: {path}")
         logger.info(f"Writing to pass: {path}")
         proc = subprocess.Popen(
             f"pass insert -m -f {path}",
@@ -2256,7 +2826,7 @@ class Pass:
     @classmethod
     def read(self, path: str, action: str = "Requesting to read") -> Op[str]:
         """Return None if path doesn't exist."""
-        print(f"{action} from pass: {path}")
+        _err(f"{action} from pass: {path}")
         logger.info(f"Reading from pass: {path}")
         retcode, conf_str = _get_stdout(f"pass show {path}")
         if retcode != 0:
@@ -2267,16 +2837,29 @@ class Pass:
 class GPG:
     """Access to GPG."""
 
+    def __init__(self):
+        self.gpg_path: Op[str] = _get_gpg_command()
+
+    @property
+    def system_has_gpg(self):
+        return bool(self.gpg_path)
+
     @classmethod
     def write(self, path: str, content: str) -> bool:
         """Return True if write successful."""
         logger.info(f"Writing to GPG: {path}")
         gpg_key = os.environ.get("COLDCORE_GPG_KEY", _find_gpg_default_key())
-        assert gpg_key
+        gpg_mode = f"-e -r {gpg_key}"
+
+        if not gpg_key:
+            _err(
+                "No default-key present; encrypting to GPG using a passphrase",
+            )
+            gpg_mode = "-c"
 
         with open(path, "w") as f:
             proc = subprocess.Popen(
-                f"gpg -e -r {gpg_key}", shell=True, stdout=f, stdin=subprocess.PIPE
+                f"gpg {gpg_mode}", shell=True, stdout=f, stdin=subprocess.PIPE
             )
             proc.communicate(content.encode())
 
@@ -2289,6 +2872,7 @@ class GPG:
             logger.warning(f"tried to read from GPG path {p} that doesn't exist")
             return None
 
+        logger.info(f"Reading from GPG: {path}")
         (retcode, content) = _get_stdout(f"gpg -d {p}")
 
         if retcode == 0:
@@ -2316,7 +2900,7 @@ def _find_gpg_default_key() -> Op[str]:
         pass
 
     if not default_key_line:
-        raise RuntimeError(
+        logger.warning(
             f"Must set `default-key` in {gpg_conf_path} or "
             "use COLDCORE_GPG_KEY envvar, otherwise don't know "
             "what to encrypt with.",
@@ -2326,8 +2910,52 @@ def _find_gpg_default_key() -> Op[str]:
     return default_key_line.split("default-key ")[-1]
 
 
+CONFIG_DIR = Path.home() / ".config" / "coldcore"
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.ini"
+
+
+# TODO move config backend to prefix system
+
+
+def _get_gpg_command() -> Op[str]:
+    """Find the version, if any, of GPG installed."""
+    if _get_stdout("which gpg2")[0] == 0:
+        return "gpg2"
+    elif _get_stdout("which gpg")[0] == 0:
+        return "gpg"
+    return None
+
+
+def get_path_for_new_config() -> str:
+    # FIXME: prefix backends
+    # gpg = _get_gpg_command()
+    # if gpg:
+    #     return CONFIG_DIR / "config.ini.gpg"
+    return str(CONFIG_DIR / "config.ini")
+
+
+def find_default_config() -> Op[str]:
+    """
+    Find an existing default configuration file. We do this
+    (vs. get_path_for_new_config) because a user may have created a configuration file
+    and then installed GPG.
+    """
+    # Prefer GPG configs
+    for ext in (".gpg", ""):
+        path = CONFIG_DIR / ("config.ini" + ext)
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _is_pass_path(p: str) -> bool:
+    return p.startswith(PASS_PREFIX)
+
+
 def _get_config(
     wallet_names: Op[t.List[str]] = None,
+    bitcoind_json_url: str = "",
+    require_wallets: bool = True,
 ) -> t.Tuple[GlobalConfig, t.List[Wallet]]:
     """
     Load in coldcore config from some source.
@@ -2336,22 +2964,30 @@ def _get_config(
     be the first item in the list.
     """
     confp = ConfigParser()
-    conf_path = str(
-        cli.args.config or os.environ.get("COLDCORE_CONFIG", DEFAULT_CONFIG_PATH)
+    conf_path = cli.args.config or os.environ.get(
+        "COLDCORE_CONFIG", find_default_config()
     )
+
+    if (
+        conf_path
+        and not _is_pass_path(conf_path)
+        and not conf_path.startswith(str(DEFAULT_CONFIG_PATH))
+        and not Path(conf_path).exists()
+    ):
+        print(f"Configuration not readable from {conf_path}")
+        sys.exit(1)
 
     # TODO this is okay for right now, but maybe think about making this less
     # automatic and more explicit.
-    if Path(conf_path) == DEFAULT_CONFIG_PATH and not DEFAULT_CONFIG_PATH.exists():
-        if not CONFIG_DIR.exists():
-            # FIXME macOS
-            CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-        logger.info(f"Creating blank configuration at {DEFAULT_CONFIG_PATH}")
-        with open(DEFAULT_CONFIG_PATH, "w") as f:
-            GlobalConfig.write_blank(f)
+    if not conf_path:
+        conf_path = get_path_for_new_config()
+
+    if not CONFIG_DIR.exists():
+        # FIXME macOS
+        CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     # Optionally, read the configuration from `pass`.
-    elif conf_path.startswith(PASS_PREFIX):
+    if _is_pass_path(conf_path):
         passobj = Pass()
         passpath = conf_path.split(PASS_PREFIX, 1)[-1]
         contents = passobj.read(passpath, action="Requesting to load configuration INI")
@@ -2360,35 +2996,46 @@ def _get_config(
             msg = f"Creating blank configuration at {conf_path}"
             logger.info(msg)
             print(msg)
+            contents = _get_blank_conf(bitcoind_json_url)
             # config doesn't exist, so insert it
-            if not passobj.write(passpath, GlobalConfig.BLANK_CONF):
+            if not passobj.write(passpath, contents):
                 print(f"Failed to write new configuration to {conf_path}")
                 sys.exit(1)
-
-            contents = GlobalConfig.BLANK_CONF
 
         confp.read_string(contents)
 
     # Or read from GPG
     elif conf_path.endswith(".gpg"):
         gpg = GPG()
+        _err(f"Reading configuration from {conf_path} with GPG")
         contents = gpg.read(conf_path)
 
         if not contents:
             msg = f"Creating blank configuration at {conf_path}"
             logger.info(msg)
             print(msg)
+            contents = _get_blank_conf(bitcoind_json_url)
             # config doesn't exist, so insert it
-            gpg.write(conf_path, GlobalConfig.BLANK_CONF)
-            contents = GlobalConfig.BLANK_CONF
+            gpg.write(conf_path, contents)
 
         confp.read_string(contents)
 
     # Or just read it from some file path.
     else:
+        if not Path(conf_path).exists():
+            logger.info(f"Creating blank configuration at {conf_path}")
+
+            _warn("WARNING: creating an unencrypted configuration file.")
+            _warn("Please consider installing GPG and/or pass to support config file ")
+            _warn("encryption. If someone gains access to your xpubs, they can ")
+            _warn("see all of your addresses.")
+
+            with open(conf_path, "w") as f:
+                GlobalConfig.write_blank(f, bitcoind_json_url)
+
         confp.read(conf_path)
 
-    (conf, wallet_confs) = GlobalConfig.from_ini(str(conf_path), confp)
+    (conf, wallet_confs) = GlobalConfig.from_ini(conf_path, confp)
 
     logger.debug("loaded with config: %s", conf)
     logger.debug("loaded with wallets: %s", wallet_confs)
@@ -2401,21 +3048,31 @@ def _get_config(
     if wallet_names:
         wallet_confs = [w for w in wallet_confs if w.name in wallet_names]
 
+    default_wallet = cli.args.wallet or conf.default_wallet
+
     # Return the default wallet first.
     wallet_confs = sorted(
-        wallet_confs, key=lambda w: w.name == conf.default_wallet, reverse=True
+        wallet_confs, key=lambda w: w.name == default_wallet, reverse=True
     )
+
+    if require_wallets and not wallet_confs:
+        conf.err("At least one wallet config is required but none were found.")
+        conf.err("Try running `coldcore setup --help` to set up a wallet")
+        sys.exit(1)
 
     return (conf, wallet_confs)
 
 
-if __name__ == "__main__":
+def main():
     cli.parse_for_run()
     log_path = setup_logging()
     cli.run()
 
     if log_path:
-        print(
+        _warn(
             f"WARNING: remove logfiles at {log_path} to prevent leaking sensitive data",
-            file=sys.stderr,
         )
+
+
+if __name__ == "__main__":
+    main()

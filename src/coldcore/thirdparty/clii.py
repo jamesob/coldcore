@@ -181,6 +181,7 @@ class App:
     def __init__(self, *args, **kwargs):
         self.parser = argparse.ArgumentParser(*args, **kwargs)
         self.subparsers = None
+        self.args = argparse.Namespace()
 
     def add_arg(self, *args, **kwargs):
         self.parser.add_argument(*args, **kwargs)

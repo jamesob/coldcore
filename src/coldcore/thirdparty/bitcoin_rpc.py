@@ -81,7 +81,7 @@ class BaseProxy(object):
                 btc_conf_file = os.path.expanduser("~/.bitcoin")
             btc_conf_file = os.path.join(btc_conf_file, "bitcoin.conf")
 
-        if service_url is None:
+        if not service_url:
             # Bitcoin Core accepts empty rpcuser, not specified in btc_conf_file
             conf = self._get_bitcoind_conf_from_filesystem(btc_conf_file)
             if service_port is None:

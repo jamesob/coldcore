@@ -2,6 +2,7 @@
 """
 TODO
 
+- [ ] add wallet name
 - [ ] curses control panel
 - [ ] add version birthday to new config
 - [ ] handle overflow in curses balance panel
@@ -54,7 +55,9 @@ from .ui import (
     info_line,
     yellow,
     bold,
+    green,
     conn_line,
+    bullet_line,
 )
 
 __VERSION__ = "0.1.0-alpha"
@@ -99,6 +102,13 @@ cli.add_arg(
     default=None,
     help="The specific wallet to open.",
 )
+cli.add_arg(
+    "--rpc",
+    "-r",
+    action="store",
+    default=None,
+    help="The Bitcoin Core RPC interface URL to use, e.g. 'http://user:pass@host:8332'",
+)
 
 PASS_PREFIX = "pass:"
 
@@ -109,6 +119,14 @@ def _err(s: str):
 
 def _warn(s: str):
     print(warning_line(s), file=sys.stderr, flush=True)
+
+
+def _info(s: str):
+    print(bullet_line(s), file=sys.stderr, flush=True)
+
+
+def _blank(s: str):
+    print(f"    {s}", file=sys.stderr, flush=True)
 
 
 def setup_logging() -> Op[Path]:
@@ -444,8 +462,8 @@ class UTXO:
 class WizardController:
     """Used to proxy logic into the terminal UI."""
 
-    def create_config(self) -> "GlobalConfig":
-        return _get_config()[0]
+    def create_config(self, p: str, url: str) -> "GlobalConfig":
+        return create_config(p, url)
 
     def parse_cc_public(self, contents: str, rpc: BitcoinRPC) -> CCWallet:
         return CCWallet.from_io(io.StringIO(contents), rpc)
@@ -456,6 +474,15 @@ class WizardController:
     def discover_rpc(self, *args, **kwargs) -> Op[BitcoinRPC]:
         return discover_rpc(*args, **kwargs)
 
+    def has_gpg(self) -> bool:
+        return _get_gpg_command()
+
+    def has_pass(self) -> bool:
+        return _get_stdout("which pass")[0] == 0
+
+    def suggested_config_path(self, use_gpg: bool = False) -> str:
+        return get_path_for_new_config(use_gpg)
+
     def get_utxos(self, rpcw):
         return get_utxos(rpcw)
 
@@ -465,13 +492,19 @@ class WizardController:
     def psbt_to_tx_hex(self, *args, **kwargs) -> str:
         return _psbt_to_tx_hex(*args, **kwargs)
 
+    def confirm_broadcast(self, *args, **kwargs) -> bool:
+        return confirm_broadcast(*args, **kwargs)
+
 
 def discover_rpc(
     config: Op["GlobalConfig"] = None, url: Op[str] = None
 ) -> Op[BitcoinRPC]:
     """Return an RPC connection to Bitcoin if possible."""
     service_url = None
-    if config:
+
+    if cli.args.rpc:
+        service_url = cli.args.rpc
+    elif config:
         service_url = config.bitcoind_json_url
     elif url:
         service_url = url
@@ -505,16 +538,14 @@ def get_rpc(
     cache = get_rpc._rpc_cache  # type: ignore
 
     wallet_name = wallet.name if wallet else ""
+    cache_key = (wallet_name, url)
 
-    if wallet_name in cache:
-        return cache[wallet_name]
+    if cache_key in cache:
+        return cache[cache_key]
 
     if not wallet:
         got = _get_rpc_inner(url, **kwargs)
-        cache[wallet_name] = got
-        if not quiet:
-            hoststr = yellow(f"{got.host}:{got.port}")
-            _err(conn_line(f"connected to Bitcoin Core at {hoststr}"))
+        cache[cache_key] = got
     else:
         plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
         try:
@@ -525,11 +556,11 @@ def get_rpc(
             # Wallet already loaded.
             if e.error.get("code") != -4:  # type: ignore
                 raise
-        cache[wallet_name] = _get_rpc_inner(
+        cache[cache_key] = _get_rpc_inner(
             url, net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
         )
 
-    return cache[wallet_name]
+    return cache[cache_key]
 
 
 def _get_rpc_inner(
@@ -565,7 +596,7 @@ class GlobalConfig:
     gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
 
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
-        return get_rpc(self.bitcoind_json_url, wallet, **kwargs)
+        return get_rpc(cli.args.rpc or self.bitcoind_json_url, wallet, **kwargs)
 
     def info(self, *args, **kwargs):
         if not self.disable_echo:
@@ -748,8 +779,7 @@ def _prepare_send(
     filename = f"unsigned-{nowstr}.psbt"
     Path(filename).write_bytes(base64.b64decode(result["psbt"]))
 
-    config.echo(result)
-    config.echo(f"Wrote PSBT to {filename} - sign with coldcard")
+    _info(f"Wrote PSBT to {filename} - sign with coldcard")
 
     return filename
 
@@ -784,7 +814,7 @@ def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
     return True
 
 
-def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> bool:
+def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str) -> bool:
     """Display information about the transaction to be performed and confirm."""
     info = rpcw.decoderawtransaction(hex_val)
     outs: t.List[t.Tuple[str, Decimal]] = []
@@ -793,7 +823,7 @@ def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> 
         addrs = ",".join(out["scriptPubKey"]["addresses"])
         outs.append((addrs, out["value"]))
 
-    config.info("About to send a transaction:\n")
+    _info("About to send a transaction:\n")
     for o in outs:
         try:
             addr_info = rpcw.getaddressinfo(o[0])
@@ -801,13 +831,14 @@ def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> 
             # TODO handle this
             raise
 
+        amt = bold(green(f"{o[1]} BTC"))
         yours = addr_info["ismine"] or addr_info["iswatchonly"]
         yours_str = "  (your address)" if yours else ""
-        config.info(f" -> {o[0]}  ({o[1]} BTC){yours_str}")
+        _blank(f"     -> {bold(o[0])}  ({amt}){yours_str}")
 
-    config.info("\n")
+    print()
 
-    inp = input("Look okay? [y/N]: ").strip().lower()
+    inp = input(f" {yellow('?')}  look okay? [y/N]: ").strip().lower()
 
     if inp != "y":
         return False
@@ -831,7 +862,7 @@ def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
 
 
 @cli.cmd
-def setup(public_wallet_data: str, rpc_url: str = ""):
+def setup(public_wallet_data: str):
     """
     Run initial setup for a wallet. This creates the local configuration file (if
     one doesn't already exist) and populates a watch-only wallet in Core.
@@ -840,7 +871,7 @@ def setup(public_wallet_data: str, rpc_url: str = ""):
         public_wallet_data: path to Coldcard's public.txt or '-' to read from stdin
         rpc_url: URL to Bitcoin Core JSON RPC, e.g. 'http://user:pass@host:8332'
     """
-    rpc = discover_rpc(url=rpc_url)
+    rpc = discover_rpc()
 
     if not rpc:
         _warn("Bitcoin Core JSON RPC server could not be detected")
@@ -849,6 +880,7 @@ def setup(public_wallet_data: str, rpc_url: str = ""):
         sys.exit(1)
 
     (config, _) = _get_config(bitcoind_json_url=rpc.url, require_wallets=False)
+    # TODO fix this to call create_config() if necessary
     rpc = config.rpc()
 
     wall = _wallet_from_input(public_wallet_data, rpc)
@@ -944,7 +976,7 @@ def _run_rescan(rpcw: BitcoinRPC, begin_height: int):
 @cli.cmd
 def watch():
     """Watch activity related to your wallets."""
-    (config, (wall, *_)) = _get_config()
+    (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
 
     utxos = get_utxos(rpcw)
@@ -977,7 +1009,7 @@ def watch():
 @cli.cmd
 def balance():
     """Check your wallet balances."""
-    (config, (wall, *_)) = _get_config()
+    (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
     utxos = UTXO.from_listunspent(rpcw.listunspent(0))  # includes unconfirmed
     utxos = sorted(utxos, key=lambda u: -u.num_confs)
@@ -1000,7 +1032,7 @@ def prepare_send(to_address: str, amount: str, spend_from: str = ""):
         amount: amount to send in BTC
         spend_from: comma-separated addresses to pull unspents from as inputs
     """
-    (config, (wall, *_)) = _get_config()
+    (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
     spend_from_list = spend_from.split(",") if spend_from else None
 
@@ -1010,12 +1042,12 @@ def prepare_send(to_address: str, amount: str, spend_from: str = ""):
 @cli.cmd
 def broadcast(signed_psbt_path: Path):
     """Broadcast a signed PSBT."""
-    (config, (wall, *_)) = _get_config()
+    (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
     hex_val = _psbt_to_tx_hex(rpcw, signed_psbt_path)
     assert hex_val
 
-    if not _confirm_broadcast(config, rpcw, hex_val):
+    if not confirm_broadcast(rpcw, hex_val):
         config.echo("Aborting transaction! Doublespend the inputs!")
         return
 
@@ -1024,17 +1056,20 @@ def broadcast(signed_psbt_path: Path):
 
 @cli.cmd
 def newaddr():
-    (config, (wall, *_)) = _get_config()
+    (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
     config.echo(rpcw.getnewaddress())
 
 
+@cli.main
 @cli.cmd
 def ui():
     """Start a curses UI."""
-    config, walls = _get_config()
-    config.disable_echo = True
-    start_ui(config, walls)
+    # TODO filter menu items based on wallet availability (only setup allowed)
+    config, walls = _get_config(require_wallets=False)
+    if config:
+        config.disable_echo = True
+    start_ui(config, walls, WizardController())
 
 
 class Pass:
@@ -1081,12 +1116,16 @@ class GPG:
     def write(self, path: str, content: str) -> bool:
         """Return True if write successful."""
         logger.info(f"Writing to GPG: {path}")
-        gpg_key = os.environ.get("COLDCORE_GPG_KEY", _find_gpg_default_key())
+        gpg_key = find_gpg_default_key()
         gpg_mode = f"-e -r {gpg_key}"
 
         if not gpg_key:
-            _err(
+            _info(
                 "No default-key present; encrypting to GPG using a passphrase",
+            )
+            _info(
+                "(to use a default key, set envvar COLDCORE_GPG_KEY "
+                "or default-key in gpg.conf)"
             )
             gpg_mode = "-c"
 
@@ -1115,10 +1154,14 @@ class GPG:
         return None
 
 
-def _find_gpg_default_key() -> Op[str]:
+def find_gpg_default_key() -> Op[str]:
     """Get the GPG default-key to encrypt with."""
     gpg_conf_path = Path.home() / ".gnupg" / "gpg.conf"
     gpg_conf_lines = []
+    key = os.environ.get("COLDCORE_GPG_KEY")
+    if key:
+        return key
+
     try:
         gpg_conf_lines = gpg_conf_path.read_text().splitlines()
     except FileNotFoundError:
@@ -1159,11 +1202,11 @@ def _get_gpg_command() -> Op[str]:
     return None
 
 
-def get_path_for_new_config() -> str:
+def get_path_for_new_config(use_gpg=False) -> str:
     # FIXME: prefix backends
-    # gpg = _get_gpg_command()
-    # if gpg:
-    #     return CONFIG_DIR / "config.ini.gpg"
+    gpg = _get_gpg_command()
+    if gpg and use_gpg:
+        return str(CONFIG_DIR / "config.ini.gpg")
     return str(CONFIG_DIR / "config.ini")
 
 
@@ -1181,15 +1224,92 @@ def find_default_config() -> Op[str]:
     return None
 
 
-def _is_pass_path(p: str) -> bool:
-    return p.startswith(PASS_PREFIX)
+def _is_pass_path(p: Op[str]) -> bool:
+    return bool(p) and p.startswith(PASS_PREFIX)  # type: ignore
+
+
+def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
+    """
+    Write a new global config file out using some storage backend.
+    """
+    if not CONFIG_DIR.exists():
+        # FIXME macOS
+        CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    confp = ConfigParser()
+
+    def confirm_overwrite() -> bool:
+        if Path(conf_path).exists():
+            prompt = (
+                f"Are you sure you want to overwrite "
+                f"the existing file at {conf_path}? [y/N] "
+            )
+            return input(prompt).lower() == "y"
+        return True
+
+    # Optionally, read the configuration from `pass`.
+    if _is_pass_path(conf_path):
+        passobj = Pass()
+        passpath = conf_path.split(PASS_PREFIX, 1)[-1]
+        msg = f"Creating blank configuration at {conf_path}"
+        logger.info(msg)
+        _info(msg)
+        contents = _get_blank_conf(bitcoind_json_url)
+        # config doesn't exist, so insert it
+        if not passobj.write(passpath, contents):
+            print(f"Failed to write new configuration to {conf_path}")
+            return None
+
+        confp.read_string(contents)
+
+    # Or read from GPG
+    elif conf_path.endswith(".gpg"):
+        gpg = GPG()
+        if not confirm_overwrite():
+            return None
+        msg = f"Creating blank configuration at {conf_path}"
+        logger.info(msg)
+        _info(msg)
+        contents = _get_blank_conf(bitcoind_json_url)
+        # config doesn't exist, so insert it
+        if not gpg.write(conf_path, contents):
+            print(f"Failed to write new configuration to {conf_path}")
+            return None
+        confp.read_string(contents)
+
+    # Or just read it from some file path.
+    else:
+        logger.info(f"Creating blank configuration at {conf_path}")
+        if not confirm_overwrite():
+            return None
+
+        _warn("WARNING: creating an unencrypted configuration file.")
+        _warn("Please consider installing GPG and/or pass to support config file ")
+        _warn("encryption. If someone gains access to your xpubs, they can ")
+        _warn("see all of your addresses.")
+
+        with open(conf_path, "w") as f:
+            GlobalConfig.write_blank(f, bitcoind_json_url)
+
+        confp.read(conf_path)
+
+    return GlobalConfig.from_ini(conf_path, confp)[0]
+
+
+def _get_config_required(*args, **kwargs) -> t.Tuple[GlobalConfig, t.List[Wallet]]:
+    ret = _get_config(*args, **kwargs)
+    if not ret[0]:
+        _warn("Please ensure this file is readable or run `coldcore` -> setup")
+        sys.exit(1)
+
+    return ret
 
 
 def _get_config(
     wallet_names: Op[t.List[str]] = None,
     bitcoind_json_url: str = "",
     require_wallets: bool = True,
-) -> t.Tuple[GlobalConfig, t.List[Wallet]]:
+) -> t.Tuple[Op[GlobalConfig], Op[t.List[Wallet]]]:
     """
     Load in coldcore config from some source.
 
@@ -1200,24 +1320,13 @@ def _get_config(
     conf_path = cli.args.config or os.environ.get(
         "COLDCORE_CONFIG", find_default_config()
     )
+    none = (None, None)
 
-    if (
-        conf_path
-        and not _is_pass_path(conf_path)
-        and not conf_path.startswith(str(DEFAULT_CONFIG_PATH))
-        and not Path(conf_path).exists()
-    ):
-        print(f"Configuration not readable from {conf_path}")
-        sys.exit(1)
-
-    # TODO this is okay for right now, but maybe think about making this less
-    # automatic and more explicit.
     if not conf_path:
-        conf_path = get_path_for_new_config()
+        return none
 
-    if not CONFIG_DIR.exists():
-        # FIXME macOS
-        CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    def fail():
+        _warn(f"Failed to read config from {conf_path}")
 
     # Optionally, read the configuration from `pass`.
     if _is_pass_path(conf_path):
@@ -1226,14 +1335,8 @@ def _get_config(
         contents = passobj.read(passpath, action="Requesting to load configuration INI")
 
         if not contents:
-            msg = f"Creating blank configuration at {conf_path}"
-            logger.info(msg)
-            print(msg)
-            contents = _get_blank_conf(bitcoind_json_url)
-            # config doesn't exist, so insert it
-            if not passobj.write(passpath, contents):
-                print(f"Failed to write new configuration to {conf_path}")
-                sys.exit(1)
+            fail()
+            return none
 
         confp.read_string(contents)
 
@@ -1244,28 +1347,16 @@ def _get_config(
         contents = gpg.read(conf_path)
 
         if not contents:
-            msg = f"Creating blank configuration at {conf_path}"
-            logger.info(msg)
-            print(msg)
-            contents = _get_blank_conf(bitcoind_json_url)
-            # config doesn't exist, so insert it
-            gpg.write(conf_path, contents)
+            fail()
+            return none
 
         confp.read_string(contents)
 
     # Or just read it from some file path.
     else:
         if not Path(conf_path).exists():
-            logger.info(f"Creating blank configuration at {conf_path}")
-
-            _warn("WARNING: creating an unencrypted configuration file.")
-            _warn("Please consider installing GPG and/or pass to support config file ")
-            _warn("encryption. If someone gains access to your xpubs, they can ")
-            _warn("see all of your addresses.")
-
-            with open(conf_path, "w") as f:
-                GlobalConfig.write_blank(f, bitcoind_json_url)
-
+            fail()
+            return none
         confp.read(conf_path)
 
     (conf, wallet_confs) = GlobalConfig.from_ini(conf_path, confp)

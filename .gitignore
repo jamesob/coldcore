@@ -1,5 +1,6 @@
 # Bitcoin stuff
 
+public.txt
 *.psbt
 
 # Byte-compiled / optimized / DLL files

@@ -31,6 +31,11 @@ A trust-minimized Bitcoin wallet interface
   `pass:Some/Path`, it will run `pass show Some/Path` to retrieve your config. If
   the path ends in `.gpg`, we will use GPG to decrypt the configuration.
 
+### Global flags
+
+#### `coldcore --rpc <url>`
+
+#### `coldcore --wallet <wallet-name>`
 
 ## FAQ
 
