@@ -208,8 +208,17 @@ class App:
         if not self.subparsers:
             self.subparsers = self.parser.add_subparsers()
 
+        desc = fnc.__doc__ or ""
+        doclines = []
+
+        for line in desc.splitlines():
+            if line.strip().lower() in ["args:", "kwargs;"]:
+                break
+            doclines.append(line)
+
         sub = self.subparsers.add_parser(
-            fnc.__name__.replace("_", "-"), description=fnc.__doc__
+            fnc.__name__.replace("_", "-"),
+            description="\n".join(doclines),
         )
         logger.debug("Added subparser: %s", sub)
 

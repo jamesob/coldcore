@@ -9,21 +9,28 @@ import sys
 import traceback
 import socket
 import threading
+import base64
 import datetime
 import shutil
 import os
+import json
+import decimal
 from dataclasses import dataclass
-from decimal import Decimal
 from pathlib import Path
 from collections import namedtuple
-from typing import Optional as Op
 
 
 logger = logging.getLogger("ui")
 
-colr = curses.color_pair
-curses_bold = curses.A_BOLD
 
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, decimal.Decimal):
+            return str(o)
+        return super(DecimalEncoder, self).default(o)
+
+
+colr = curses.color_pair
 _use_color_no_tty = True
 
 
@@ -140,6 +147,60 @@ class Action:
     pass
 
 
+class OutputFormatter:
+    def __init__(self):
+        self.spinner = Spinner()
+
+    def p(self, msg: str = "", clear=False, **kwargs):
+        if clear:
+            msg = f"\r{msg}"
+        else:
+            msg += "\n"
+        print(msg, flush=True, file=sys.stderr, end="", **kwargs)
+
+    def task(self, s: str, **kwargs):
+        self.p(info_line(s), **kwargs)
+
+    def blank(self, s: str, **kwargs):
+        self.p("    " + s, **kwargs)
+
+    def done(self, s: str, **kwargs):
+        self.p(check_line(s), **kwargs)
+
+    def alert(self, s: str, **kwargs):
+        self.p(f" {yellow('!')}  " + s, **kwargs)
+
+    def info(self, s: str, **kwargs):
+        self.p(bullet_line(s), **kwargs)
+
+    def inp(self, s: str) -> str:
+        got = input(yellow(" ?  ") + s).strip()
+        self.p()
+        return got
+
+    def warn(self, s: str, **kwargs):
+        self.p(warning_line(s), **kwargs)
+
+    def spin(self, s: str):
+        self.p(f" {self.spinner.spin()}  {s} ", clear=True)
+
+    def section(self, s: str):
+        self.p()
+        self.p(f" {bold('#')}  {bold(s)}")
+        self.p(f"    {'-' * len(s)}")
+        self.p()
+
+    def finish(self, config=None, wallet=None) -> t.Tuple[int, Action]:
+        self.p()
+        time.sleep(1)
+        self.blank("   enjoy your wallet, and remember...")
+        time.sleep(1.5)
+        print(textwrap.indent(neversell, "     "))
+        self.p()
+        input("    press [enter] to return home ")
+        return (config, wallet)
+
+
 class Spinner:
     def __init__(self):
         self.i = -1
@@ -165,350 +226,328 @@ class MenuItem(namedtuple("MenuItem", "idx,title,action")):
         return (self.idx, self.title, mchoice == self)
 
 
-class TermSetupScene(Scene):
-    def draw(self, k: int) -> t.Tuple[int, Action]:
-        curses.endwin()
-        width = shutil.get_terminal_size().columns
-        os.system("cls" if os.name == "nt" else "clear")
+def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
+    curses.endwin()
+    width = shutil.get_terminal_size().columns
+    os.system("cls" if os.name == "nt" else "clear")
 
-        def p(msg: str = "", clear=False, **kwargs):
-            if clear:
-                msg = f"\r{msg}"
-            else:
-                msg += "\n"
-            print(msg, flush=True, end="", **kwargs)
+    formatter = OutputFormatter()
+    p = formatter.p
+    section = formatter.section
+    inp = formatter.inp
+    blank = formatter.blank
+    warn = formatter.warn
+    info = formatter.info
+    done = formatter.done
+    task = formatter.task
+    spin = formatter.spin
+    finish = formatter.finish
 
-        def task(s: str, **kwargs):
-            p(info_line(s), **kwargs)
-
-        def blank(s: str, **kwargs):
-            p("    " + s, **kwargs)
-
-        def done(s: str, **kwargs):
-            p(check_line(s), **kwargs)
-
-        def info(s: str, **kwargs):
-            p(bullet_line(s), **kwargs)
-
-        def inp(s: str) -> str:
-            got = input(yellow(" ?  ") + s).strip()
-            p()
-            return got
-
-        def warn(s: str, **kwargs):
-            p(warning_line(s), **kwargs)
-
-        def spin(s: str):
-            p(f" {spinner.spin()}  {s} ", clear=True)
-
-        def section(s: str):
-            p()
-            p(f" {bold('#')}  {bold(s)}")
-            p(f"    {'-' * len(s)}")
-            p()
-
-        def finish() -> t.Tuple[int, Action]:
-            p()
-            time.sleep(1)
-            blank("   enjoy your wallet, and remember...")
-            time.sleep(1.5)
-            print(textwrap.indent(neversell, "     "))
-            p()
-            input("    press [enter] to return home ")
-            return (-1, GoHome)
-
-        spinner = Spinner()
-
-        title = cyan(
-            f"""
+    title = cyan(
+        f"""
               __
 .-----.-----.|  |_.--.--.-----.
 |__ --|  -__||   _|  |  |  _  |
-|_____|_____||____|_____|   __| {'=' * (width - 39)}
+|_____|_____||____|_____|   __| {'=' * (max(0, width - 45))}
                         |__|
 """
-        )
-        p(title)
+    )
+    p(title)
 
-        blank("searching for Bitcoin Core...")
-        rpc = self.controller.discover_rpc(self.config)
-        if not rpc:
-            warn("couldn't detect Bitcoin Core - make sure it's running locally, or")
-            warn("use `coldcore --rpc <url>`")
-            sys.exit(1)
+    blank("searching for Bitcoin Core...")
+    rpc = controller.discover_rpc(config)
+    if not rpc:
+        warn("couldn't detect Bitcoin Core - make sure it's running locally, or")
+        warn("use `coldcore --rpc <url>`")
+        sys.exit(1)
 
-        hoststr = yellow(f"{rpc.host}:{rpc.port}")
-        p(conn_line(f"connected to Bitcoin Core at {hoststr}"))
-        p()
+    hoststr = yellow(f"{rpc.host}:{rpc.port}")
+    p(conn_line(f"connected to Bitcoin Core at {hoststr}"))
+    p()
 
-        def delay(t: float = 1.0):
-            time.sleep(t)
+    def delay(t: float = 1.0):
+        time.sleep(t)
 
-        if not self.config:
-            section("config file setup")
-            delay()
-            pre = "you can encrypt your config file with"
-
-            use_gpg = False
-            if self.controller.has_gpg():
-                if inp("do you want to use GPG to encrypt your config? [y/N] ") == "y":
-                    use_gpg = True
-
-            if self.controller.has_pass():
-                info(f"{pre} pass by prefixing your path with 'pass:'")
-                delay()
-
-            defaultpath = self.controller.suggested_config_path(use_gpg)
-            where = inp(f"where should I store your config? [{defaultpath}] ")
-            where = where or defaultpath
-            self.config = self.controller.create_config(where, rpc.url)
-        else:
-            done(f"loaded config from {yellow(self.config.loaded_from)}")
-
-        p()
-
-        section("Coldcard hardware setup")
-
-        inp(
-            "have you set up coldcard "
-            "(https://coldcardwallet.com/docs/quick)? [press enter] "
-        )
-
-        blank("checking Bitcoin Core sync progres...")
-        chaininfo = {"verificationprogress": 0}
-        while chaininfo["verificationprogress"] < 0.999:
-            try:
-                chaininfo = rpc.getblockchaininfo()
-            except Exception:
-                pass
-            prog = "%.2f" % (chaininfo["verificationprogress"] * 100)
-            info(f"initial block download progress: {prog}%", clear=True)
-
-        height = f"(height: {yellow(str(chaininfo['blocks']))})"
-        done(f"chain sync completed {height}      ", clear=True)
-        p()
-        p()
-
-        section("xpub import from Coldcard")
+    use_gpg = False
+    if not config:
+        section("config file setup")
         delay()
+        pre = "you can encrypt your config file with"
 
-        blank("now we're going to import your wallet's public information")
-        blank("on your coldcard, go to Advanced > MicroSD > Dump Summary")
-        blank("(see: https://coldcardwallet.com/docs/microsd#dump-summary-file)")
-        p()
-        warn("this is not key material, but it can be used to track your addresses")
-        p()
-        cwd = os.getcwd()
-        task(f"place this file in this directory ({cwd})")
-        p()
+        if controller.has_gpg():
+            if inp("do you want to use GPG to encrypt your config? [y/N] ") == "y":
+                use_gpg = True
 
-        pubfilepath = Path("./public.txt")
-        if not pubfilepath.exists():
-            prompt = "would you like me to open a file explorer for you here? [Y/n] "
-            if inp(prompt).lower() in ["y", ""]:
-                # TODO devnull output and make function for this
-                subprocess.Popen("xdg-open .", shell=True)
+        if controller.has_pass():
+            info(f"{pre} pass by prefixing your path with 'pass:'")
+            p()
+            delay()
 
-        pubfile = None
-        while not pubfile:
-            spin("waiting for public.txt")
-            time.sleep(0.1)
-            if pubfilepath.exists():
-                pubfile = pubfilepath
+        defaultpath = controller.suggested_config_path(use_gpg)
+        where = inp(f"where should I store your config? [{defaultpath}] ")
+        where = where or defaultpath
+        config = controller.create_config(where, rpc.url)
+    else:
+        if config.loaded_from.endswith(".gpg"):
+            use_gpg = True
+        done(f"loaded config from {yellow(config.loaded_from)}")
 
+    p()
+
+    section("Coldcard hardware setup")
+
+    inp(
+        "have you set up your Coldcard "
+        "(https://coldcardwallet.com/docs/quick)? [press enter] "
+    )
+
+    blank("checking Bitcoin Core sync progres...")
+    chaininfo = {"verificationprogress": 0}
+    while chaininfo["verificationprogress"] < 0.999:
         try:
-            wallet = self.controller.parse_cc_public(pubfile.read_text(), rpc)
+            chaininfo = rpc.getblockchaininfo()
         except Exception:
-            p()
-            warn("error parsing public.txt contents")
-            warn("check your public.txt file and try this again, or file a bug:")
-            warn("  github.com/jamesob/coldcore/issues")
-            p()
-            traceback.print_exc()
-            sys.exit(1)
+            pass
+        prog = "%.2f" % (chaininfo["verificationprogress"] * 100)
+        info(f"initial block download progress: {prog}%", clear=True)
 
-        p()
-        done("parsed xpub as ")
-        blank(f"  {yellow(wallet.descriptor_base)}")
-        p()
-        self.config.add_new_wallet(wallet)
-        self.config.write()
-        done(f"wrote config to {self.config.loaded_from}")
-        p()
+    height = f"(height: {yellow(str(chaininfo['blocks']))})"
+    done(f"chain sync completed {height}      ", clear=True)
+    delay()
+    p()
+    p()
 
-        section("wallet setup in Core")
-        self.controller.rpc_wallet_create(rpc, wallet)
-        done(f"created wallet {yellow(wallet.name)} in Core as watch-only")
+    section("xpub import from Coldcard")
+    delay()
 
-        rpcw = self.config.rpc(wallet)
-        rpcw.importmulti(*wallet.importmulti_args())
-        done("imported descriptors 0/* and 1/* (change)")
+    blank("now we're going to import your wallet's public information")
+    blank("on your coldcard, go to Advanced > MicroSD > Dump Summary")
+    blank("(see: https://coldcardwallet.com/docs/microsd#dump-summary-file)")
+    p()
+    delay()
+    warn("this is not key material, but it can be used to track your addresses")
+    p()
+    delay()
+    cwd = os.getcwd()
+    task(f"place this file in this directory ({cwd})")
+    delay()
+    p()
 
-        scan_result = {}  # type: ignore
-        scan_thread = threading.Thread(
-            target=_run_scantxoutset,
-            args=(self.config.rpc(wallet), wallet.scantxoutset_args(), scan_result),
-        )
-        scan_thread.start()
-
-        p()
-        section("scanning the chain for balance and history")
-        while scan_thread.is_alive():
-            spin("scanning the UTXO set for your balance (few minutes) ")
-            time.sleep(0.2)
-
-        p()
-        done("scan of UTXO set complete!")
-
-        unspents = scan_result["result"]["unspents"]
-        bal = sum([i["amount"] for i in unspents])
-        bal_str = yellow(bold(f"{bal} BTC"))
-        bal_count = yellow(bold(f"{len(unspents)} UTXOs"))
-        blank(
-            f"found an existing balance of {yellow(bal_str)} across {yellow(bal_count)}"
-        )
-
-        rescan_begin_height = min([i["height"] for i in unspents])
-        p()
-        blank(
-            f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
-            f"(minutes to hours)"
-        )
-        blank(f"  this allows us to find transactions associated with your coins")
-        rescan_thread = threading.Thread(
-            target=_run_rescan,
-            args=(self.config.rpc(wallet), rescan_begin_height),
-            daemon=True,
-        )
-        rescan_thread.start()
-
-        time.sleep(2)
-
-        scan_info = rpcw.getwalletinfo()["scanning"]
-        while scan_info:
-            spin(f"scan progress: {scan_info['progress'] * 100:.2f}%   ")
-            time.sleep(0.5)
-            scan_info = rpcw.getwalletinfo()["scanning"]
-
-        name = yellow(wallet.name)
-        p()
-        done(f"scan complete. wallet {name} ready to use.")
-        info(f"Hint: check out your UTXOs with `coldcore -w {wallet.name} balance`")
-
-        p()
-
-        got = inp("do you want to perform some test transactions? [Y/n] ").lower()
-
-        if got not in ["y", ""]:
-            return finish()
-
-        section("test transactions")
-
-        receive_addr1 = rpcw.getnewaddress()
-        task("send a tiny amount (we're talking like ~0.000001 BTC) to")
-        p()
-        blank(f"  {yellow(receive_addr1)}")
-        p()
-        blank("(obviously, this is an address you own)")
-        p()
-
-        got_utxo = None
-        while not got_utxo:
-            spin("waiting for transaction")
-            utxos = self.controller.get_utxos(rpcw)
-            got_utxo = utxos.get(receive_addr1)
-            time.sleep(1)
-
-        p()
-        done(
-            f"received amount of {green(str(got_utxo.amount))} "
-            f"(txid {got_utxo.txid[:8]})"
-        )
-        p()
-
-        info("great - now let's test your ability to send")
-        info(
-            "we're going to send 95% of the value of the last UTXO over "
-            "to a new address:"
-        )
-        sendtoaddr = rpcw.getnewaddress()
-        p()
-        blank(f"  {yellow(sendtoaddr)}")
-        p()
-
-        # Send 90% of the value over.
-        # TODO this is only for testing and is potentially dangerous
-        send_amt = str((got_utxo.amount * 9) / 10)
-        prepared_tx = self.controller.prepare_send(
-            self.config,
-            rpcw,
-            sendtoaddr,
-            send_amt,
-            [got_utxo.address],
-        )
-
-        info(
-            "I've prepared a transaction for you to sign in a "
-            f"file called '{prepared_tx}'"
-        )
-        p()
-
-        task("transfer this file to your Coldcard and sign it")
-        p()
-        warn(
-            "as always, remember to verify all transaction details on the Coldcard "
-            "display"
-        )
-        warn(
-            "the Coldcard should say something like "
-            "'Consolidating ... within wallet' when signing"
-        )
-        p()
-
+    pubfilepath = Path("./public.txt")
+    if not pubfilepath.exists():
         prompt = "would you like me to open a file explorer for you here? [Y/n] "
         if inp(prompt).lower() in ["y", ""]:
-            # TODO macos compat
+            # TODO devnull output and make function for this
             subprocess.Popen("xdg-open .", shell=True)
 
-        # TODO: coldcard specific?
-        signed_filename = prepared_tx.replace(".psbt", "-signed.psbt")
+    pubfile = None
+    while not pubfile:
+        spin("waiting for public.txt")
+        time.sleep(0.1)
+        if pubfilepath.exists():
+            pubfile = pubfilepath
 
-        while not Path(signed_filename).exists():
-            spin(f"waiting for the signed file ({signed_filename})")
-            time.sleep(0.5)
-
-        txhex = self.controller.psbt_to_tx_hex(rpcw, Path(signed_filename))
+    try:
+        wallet = controller.parse_cc_public(pubfile.read_text(), rpc)
+    except Exception:
         p()
+        warn("error parsing public.txt contents")
+        warn("check your public.txt file and try this again, or file a bug:")
+        warn("  github.com/jamesob/coldcore/issues")
         p()
-        done("cool! got the signed PSBT")
+        traceback.print_exc()
+        sys.exit(1)
 
-        if not self.controller.confirm_broadcast(rpcw, txhex):
-            warn("aborting - doublespend the inputs immediately")
-            return finish()
+    p()
+    done("parsed xpub as ")
+    blank(f"  {yellow(wallet.descriptor_base)}")
+    p()
+    config.add_new_wallet(wallet)
 
-        rpcw.sendrawtransaction(txhex)
-        done("transaction broadcast!")
-        p()
+    if use_gpg or config.loaded_from.startswith("pass:"):
+        info(
+            "writing wallet to encrypted config; GPG may prompt you "
+            "for your password [press enter] "
+        )
+    input()
 
-        inmempool = False
-        while not inmempool:
-            spin("waiting to see the transaction in the mempool")
-            utxos = self.controller.get_utxos(rpcw)
-            got_utxo = utxos.get(sendtoaddr)
+    config.write()
+    done(f"wrote config to {config.loaded_from}")
+    p()
 
-            if got_utxo:
-                inmempool = True
+    section("wallet setup in Core")
+    controller.rpc_wallet_create(rpc, wallet)
+    done(f"created wallet {yellow(wallet.name)} in Core as watch-only")
 
-        p()
-        done(f"saw tx {got_utxo.txid}")
-        p()
+    rpcw = config.rpc(wallet)
+    rpcw.importmulti(*wallet.importmulti_args())
+    done("imported descriptors 0/* and 1/* (change)")
 
-        section("done")
-        done(bold(f"your wallet {yellow(wallet.name)} is good to go"))
-        p()
-        p()
+    scan_result = {}  # type: ignore
+    scan_thread = threading.Thread(
+        target=_run_scantxoutset,
+        args=(config.rpc(wallet), wallet.scantxoutset_args(), scan_result),
+    )
+    scan_thread.start()
 
-        return finish()
+    p()
+    section("scanning the chain for balance and history")
+    while scan_thread.is_alive():
+        spin("scanning the UTXO set for your balance (few minutes) ")
+        time.sleep(0.2)
+
+    p()
+    done("scan of UTXO set complete!")
+
+    unspents = scan_result["result"]["unspents"]
+    bal = sum([i["amount"] for i in unspents])
+    bal_str = yellow(bold(f"{bal} BTC"))
+    bal_count = yellow(bold(f"{len(unspents)} UTXOs"))
+    blank(f"found an existing balance of {yellow(bal_str)} across {yellow(bal_count)}")
+
+    rescan_begin_height = min([i["height"] for i in unspents])
+    p()
+    blank(
+        f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
+        f"(minutes to hours)"
+    )
+    blank("  this allows us to find transactions associated with your coins")
+    rescan_thread = threading.Thread(
+        target=_run_rescan,
+        args=(config.rpc(wallet), rescan_begin_height),
+        daemon=True,
+    )
+    rescan_thread.start()
+
+    time.sleep(2)
+
+    scan_info = rpcw.getwalletinfo()["scanning"]
+    while scan_info:
+        spin(f"scan progress: {scan_info['progress'] * 100:.2f}%   ")
+        time.sleep(0.5)
+        scan_info = rpcw.getwalletinfo()["scanning"]
+
+    name = yellow(wallet.name)
+    p()
+    done(f"scan complete. wallet {name} ready to use.")
+    info(f"Hint: check out your UTXOs with `coldcore -w {wallet.name} balance`")
+
+    p()
+
+    got = inp("do you want to perform some test transactions? [Y/n] ").lower()
+
+    if got not in ["y", ""]:
+        return finish(config, wallet)
+
+    section("test transactions")
+
+    receive_addr1 = rpcw.getnewaddress()
+    task("send a tiny amount (we're talking like ~0.000001 BTC) to")
+    p()
+    blank(f"  {yellow(receive_addr1)}")
+    p()
+    blank("(obviously, this is an address you own)")
+    p()
+
+    got_utxo = None
+    while not got_utxo:
+        spin("waiting for transaction")
+        utxos = controller.get_utxos(rpcw)
+        got_utxo = utxos.get(receive_addr1)
+        time.sleep(1)
+
+    p()
+    done(
+        f"received amount of {green(str(got_utxo.amount))} "
+        f"(txid {got_utxo.txid[:8]})"
+    )
+    p()
+
+    info("great - now let's test your ability to send")
+    info(
+        "we're going to send 95% of the value of the last UTXO over "
+        "to a new address:"
+    )
+    sendtoaddr = rpcw.getnewaddress()
+    p()
+    blank(f"  {yellow(sendtoaddr)}")
+    p()
+
+    # Send 90% of the value over.
+    # TODO this is only for testing and is potentially dangerous
+    send_amt = str((got_utxo.amount * 9) / 10)
+    prepared_tx = controller.prepare_send(
+        config,
+        rpcw,
+        sendtoaddr,
+        send_amt,
+        [got_utxo.address],
+    )
+
+    info(
+        "I've prepared a transaction for you to sign in a "
+        f"file called '{prepared_tx}'"
+    )
+    p()
+
+    task("transfer this file to your Coldcard and sign it")
+    p()
+    warn(
+        "as always, remember to verify all transaction details on the Coldcard "
+        "display"
+    )
+    warn(
+        "the Coldcard should say something like "
+        "'Consolidating ... within wallet' when signing"
+    )
+    p()
+
+    prompt = "would you like me to open a file explorer for you here? [Y/n] "
+    if inp(prompt).lower() in ["y", ""]:
+        # TODO macos compat
+        subprocess.Popen("xdg-open .", shell=True)
+
+    # TODO: coldcard specific?
+    signed_filename = prepared_tx.replace(".psbt", "-signed.psbt")
+
+    while not Path(signed_filename).exists():
+        spin(f"waiting for the signed file ({signed_filename})")
+        time.sleep(0.5)
+
+    # TODO clean this up
+    psbt_hex = base64.b64encode(Path(signed_filename).read_bytes()).decode()
+    txhex = controller.psbt_to_tx_hex(rpcw, Path(signed_filename))
+    p()
+    p()
+    done("cool! got the signed PSBT")
+
+    if not controller.confirm_broadcast(rpcw, txhex, psbt_hex):
+        warn("aborting - doublespend the inputs immediately")
+        return finish(config, wallet)
+
+    rpcw.sendrawtransaction(txhex)
+    done("transaction broadcast!")
+    p()
+
+    inmempool = False
+    while not inmempool:
+        spin("waiting to see the transaction in the mempool")
+        utxos = controller.get_utxos(rpcw)
+        got_utxo = utxos.get(sendtoaddr)
+
+        if got_utxo:
+            inmempool = True
+
+    p()
+    done(f"saw tx {got_utxo.txid}")
+    p()
+
+    section("done")
+    done(bold(f"your wallet {yellow(wallet.name)} is good to go"))
+    p()
+    p()
+
+    return finish(config, wallet)
 
 
 neversell = r"""
@@ -607,7 +646,7 @@ class HomeScene(Scene):
         )
         start_x_subtitle = int((width // 2) - (len(subtitle) // 2) - len(subtitle) % 2)
 
-        with attrs(scr, colr(2), curses_bold):
+        with attrs(scr, colr(2), curses.A_BOLD):
             scr.addstr(start_y, width // 2, title)
 
         scr.addstr(start_y + title_height, start_x_subtitle, subtitle[:width])
@@ -702,14 +741,15 @@ class DashboardScene(Scene):
 
         substartx = 3
         substarty = 2
-        sub_height = int(self.height * 0.45)
+        top_panel_height = int(self.height * 0.7)
 
-        balwidth = max(int(self.width * 0.5), 61)
-        addrwidth = max(int(self.width * 0.4), 24)
+        balwidth = max(int(self.width * 0.6) - 4, 66)
+        addrwidth = max(int(self.width * 0.4) - 2, 26)
+        chainwidth = max(self.width - 6, 92)
 
         self.start_threads()
 
-        self.balance_win = scr.derwin(sub_height, balwidth, substarty, substartx)
+        self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
         self.balance_win.border()
         _s(self.balance_win, 0, 2, " UTXOs ")
 
@@ -723,7 +763,7 @@ class DashboardScene(Scene):
         with utxos_lock:
             starty = 2
             startx = 2
-            max_lines = sub_height - 2
+            max_lines = self.balance_win.getmaxyx()[0] - 6
 
             _s(self.balance_win, starty, startx, "")
             starty += 1
@@ -749,7 +789,7 @@ class DashboardScene(Scene):
                 attrslist = []
 
                 if u.num_confs < 6:
-                    attrslist.extend([colr(3), curses_bold])
+                    attrslist.extend([colr(3), curses.A_BOLD])
 
                 with attrs(self.balance_win, *attrslist):
                     _s(self.balance_win, starty + i, startx, line)
@@ -760,7 +800,7 @@ class DashboardScene(Scene):
                 self.balance_win,
                 starty + i + 1,
                 startx,
-                f"{' ':<54}{total_bal:>12}",
+                f"{' ':<50}{total_bal:>16}",
                 curses.A_BOLD,
             )
 
@@ -770,7 +810,7 @@ class DashboardScene(Scene):
                 self.new_addrs.append(rpcw.getnewaddress())
 
         self.address_win = scr.derwin(
-            sub_height, addrwidth, substarty, substartx + balwidth + 1
+            top_panel_height, addrwidth, substarty, substartx + balwidth + 1
         )
         self.address_win.box()
         _s(self.address_win, 0, 2, " unused addresses ")
@@ -785,10 +825,9 @@ class DashboardScene(Scene):
                 _s(self.address_win, 3 + i, 2, addr)
 
         chainwin_height = int(self.height * 0.25)
-        chainwin_width = int(self.width * 0.9)
 
         self.chain_win = scr.derwin(
-            chainwin_height, chainwin_width, substarty + sub_height, substartx
+            chainwin_height, chainwidth, substarty + top_panel_height, substartx
         )
         self.chain_win.box()
         _s(self.chain_win, 0, 2, " chain status ")
@@ -817,7 +856,7 @@ class DashboardScene(Scene):
                     f"{b.txs} txs - "
                     f"subsidy: {b.subsidy / 100_000_000}"
                 )
-                _s(self.chain_win, 4 + i, 3, blockstr[:chainwin_width])
+                _s(self.chain_win, 4 + i, 3, blockstr[:chainwidth])
 
         scr.refresh()
 
@@ -898,7 +937,7 @@ GoDashboard = Action()
 Quit = Action()
 
 
-def draw_menu(scr, config, wallet_configs, controller):
+def draw_menu(scr, config, wallet_configs, controller, action=None):
     # Clear and refresh the screen for a blank canvas
     scr.clear()
     scr.refresh()
@@ -914,10 +953,9 @@ def draw_menu(scr, config, wallet_configs, controller):
 
     # TODO move set_configs into constructor
     home = HomeScene(scr, config, wallet_configs, controller)
-    term_setup = TermSetupScene(scr, config, wallet_configs, controller)
     dashboard = DashboardScene(scr, config, wallet_configs, controller)
 
-    action = GoHome
+    action = action or GoHome
     k = 0
 
     while action != Quit:
@@ -932,7 +970,7 @@ def draw_menu(scr, config, wallet_configs, controller):
         except ValueError:
             kstr = "???"
 
-        statusbarstr = f"Press 'q' to exit | never sell | last keypress: {kstr} ({k})"
+        statusbarstr = f"press 'q' to exit | never sell | last keypress: {kstr} ({k})"
         if k == -1:
             statusbarstr += " | waiting"
         # Render status bar
@@ -951,7 +989,11 @@ def draw_menu(scr, config, wallet_configs, controller):
         if action == GoHome:
             (k, action) = home.draw(k)
         elif action == GoSetup:
-            term_setup.draw(k)
+            config, wallet = run_setup(config, controller)
+            if config and wallet:
+                for view in (home, dashboard):
+                    view.config = config
+                    view.wallet_configs = [wallet]
             k = -1
             action = GoHome
         elif action == GoDashboard:
@@ -974,6 +1016,16 @@ def _pad_str(s: str, num: int) -> str:
     return (" " * num) + s + (" " * num)
 
 
-def start_ui(config, wallet_configs, controller):
-    curses.wrapper(draw_menu, config, wallet_configs, controller)
-    os.system("cls" if os.name == "nt" else "clear")
+def start_ui(config, wallet_configs, controller, action=None):
+    try:
+        curses.wrapper(draw_menu, config, wallet_configs, controller, action)
+        os.system("cls" if os.name == "nt" else "clear")
+    except curses.error:
+        logger.exception(
+            "curses hit an error! the terminal might be too small, try resizing."
+        )
+        OutputFormatter().warn(
+            "The UI crashed! Terminal might be too small, try resizing."
+        )
+
+        sys.exit(1)
