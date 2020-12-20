@@ -4,6 +4,10 @@ import typing as t
 import logging
 import time
 import subprocess
+import sys
+import threading
+import datetime
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from collections import namedtuple
@@ -13,11 +17,127 @@ from typing import Optional as Op
 logger = logging.getLogger("ui")
 
 colr = curses.color_pair
-bold = curses.A_BOLD
+curses_bold = curses.A_BOLD
+
+_use_color_no_tty = True
+
+
+def use_color():
+    if sys.stdout.isatty():
+        return True
+    if _use_color_no_tty:
+        return True
+    return False
+
+
+def esc(*codes: t.Union[int, str]) -> str:
+    """Produces an ANSI escape code from a list of integers
+    :rtype: text_type
+    """
+    return t_("\x1b[{}m").format(t_(";").join(t_(str(c)) for c in codes))
+
+
+def t_(b: t.Union[bytes, t.Any]) -> str:
+    """ensure text type"""
+    if isinstance(b, bytes):
+        return b.decode()
+    return b
+
+
+def b_(t: t.Union[str, t.Any]) -> bytes:
+    """ensure binary type"""
+    if isinstance(t, str):
+        return t.encode()
+    return t
+
+
+def check_line(msg: str) -> str:
+    return green(bold(" ✔  ")) + msg
+
+
+def warning_line(msg: str) -> str:
+    return red(bold(" !  ")) + msg
+
+
+def info_line(msg: str) -> str:
+    return bold(" □  ") + msg
+
+
+def conn_line(msg: str) -> str:
+    return green(bold(" ○  ")) + msg
+
+
+###############################################################################
+# 8 bit Color
+###############################################################################
+
+
+def make_color(start, end: str) -> t.Callable[[str], str]:
+    def color_func(s: str) -> str:
+        if not use_color():
+            return s
+
+        # render
+        return start + t_(s) + end
+
+    return color_func
+
+
+# According to https://en.wikipedia.org/wiki/ANSI_escape_code#graphics ,
+# 39 is reset for foreground, 49 is reset for background, 0 is reset for all
+# we can use 0 for convenience, but it will make color combination behaves weird.
+END = esc(0)
+
+FG_END = esc(39)
+black = make_color(esc(30), FG_END)
+red = make_color(esc(31), FG_END)
+green = make_color(esc(32), FG_END)
+yellow = make_color(esc(33), FG_END)
+blue = make_color(esc(34), FG_END)
+magenta = make_color(esc(35), FG_END)
+cyan = make_color(esc(36), FG_END)
+white = make_color(esc(37), FG_END)
+gray = make_color(esc(90), FG_END)
+
+BG_END = esc(49)
+black_bg = make_color(esc(40), BG_END)
+red_bg = make_color(esc(41), BG_END)
+green_bg = make_color(esc(42), BG_END)
+yellow_bg = make_color(esc(43), BG_END)
+blue_bg = make_color(esc(44), BG_END)
+magenta_bg = make_color(esc(45), BG_END)
+cyan_bg = make_color(esc(46), BG_END)
+white_bg = make_color(esc(47), BG_END)
+
+HL_END = esc(22, 27, 39)
+
+black_hl = make_color(esc(1, 30, 7), HL_END)
+red_hl = make_color(esc(1, 31, 7), HL_END)
+green_hl = make_color(esc(1, 32, 7), HL_END)
+yellow_hl = make_color(esc(1, 33, 7), HL_END)
+blue_hl = make_color(esc(1, 34, 7), HL_END)
+magenta_hl = make_color(esc(1, 35, 7), HL_END)
+cyan_hl = make_color(esc(1, 36, 7), HL_END)
+white_hl = make_color(esc(1, 37, 7), HL_END)
+
+bold = make_color(esc(1), esc(22))
+italic = make_color(esc(3), esc(23))
+underline = make_color(esc(4), esc(24))
+strike = make_color(esc(9), esc(29))
+blink = make_color(esc(5), esc(25))
 
 
 class Action:
     pass
+
+
+class Spinner:
+    def __init__(self):
+        self.i = -1
+
+    def spin(self) -> str:
+        self.i += 1
+        return ["◰", "◳", "◲", "◱"][self.i % 4]
 
 
 class Scene:
@@ -41,13 +161,13 @@ class HomeScene(Scene):
         super().__init__()
 
         self.setup_item = MenuItem(0, "start setup", GoSetup)
-        self.monitor_item = MenuItem(1, "monitor wallet", GoHome)
+        self.dashboard_item = MenuItem(1, "dashboard", GoDashboard)
         self.send_item = MenuItem(2, "send", GoHome)
         self.recieve_item = MenuItem(3, "receive", GoHome)
 
         self.mitems = [
             self.setup_item,
-            self.monitor_item,
+            self.dashboard_item,
             self.send_item,
             self.recieve_item,
         ]
@@ -103,7 +223,7 @@ class HomeScene(Scene):
         start_x_subtitle = int((width // 2) - (len(subtitle) // 2) - len(subtitle) % 2)
         start_x_keystr = int((width // 2) - (len(keystr) // 2) - len(keystr) % 2)
 
-        with attrs(scr, colr(2), bold):
+        with attrs(scr, colr(2), curses_bold):
             scr.addstr(start_y, width // 2, title)
 
         scr.addstr(start_y + title_height, start_x_subtitle, subtitle[:width])
@@ -123,7 +243,7 @@ class HomeScene(Scene):
             scr.addstr(start_y + title_height + 8 + idx, half, start_str[:width])
 
         menu_option(*self.setup_item.args(self.mchoice))
-        menu_option(*self.monitor_item.args(self.mchoice))
+        menu_option(*self.dashboard_item.args(self.mchoice))
         menu_option(*self.send_item.args(self.mchoice))
         menu_option(*self.recieve_item.args(self.mchoice))
 
@@ -212,7 +332,7 @@ class SetupScene(Scene):
             for line in title.splitlines()
         )
 
-        with attrs(scr, colr(2), bold):
+        with attrs(scr, colr(2), curses_bold):
             scr.addstr(y_start, x_start, title)
 
         def wait():
@@ -408,7 +528,7 @@ class SetupScene(Scene):
                 f"Found a balance of {bal} BTC, earliest height: "
                 f"{self.scan_from_height}",
                 colr(5),
-                bold,
+                curses_bold,
                 ypos=scan_y,
             )
         else:
@@ -457,9 +577,11 @@ class SetupScene(Scene):
 
         self.new_step_line("Send a tiny test amount to")
         self.new_step_line("")
-        self.new_step_line(f"    {self.testaddress1}", colr(2), bold)
+        self.new_step_line(f"    {self.testaddress1}", colr(2), curses_bold)
         self.new_step_line("")
-        (waity, waitx) = self.new_step_line("Waiting for transaction", colr(4), bold)
+        (waity, waitx) = self.new_step_line(
+            "Waiting for transaction", colr(4), curses_bold
+        )
 
         if not self.receive_utxo1:
             scr.addstr(waity, waitx + 1, self._get_scroller())
@@ -476,7 +598,7 @@ class SetupScene(Scene):
             f"Received amount of {self.receive_utxo1.amount} "
             f"({self.receive_utxo1.txid[:8]})",
             colr(5),
-            bold,
+            curses_bold,
             ypos=waity,
         )
         green_check(scr, testy, check_xpos)
@@ -522,7 +644,7 @@ class SetupScene(Scene):
         signed_filename = self.prepared_tx.replace(".psbt", "-signed.psbt")
 
         (wait2y, wait2x) = self.new_step_line(
-            f"Waiting for the signed file ({signed_filename})", colr(4), bold
+            f"Waiting for the signed file ({signed_filename})", colr(4), curses_bold
         )
 
         filepath = Path(signed_filename)
@@ -533,15 +655,15 @@ class SetupScene(Scene):
             rpcw = self.config.rpc(self.cc_wallet)
             self.test_tx_hex = self.controller.psbt_to_tx_hex(rpcw, filepath)
 
-        self.new_step_line("Cool, got the signed PSBT!", colr(6), bold)
+        self.new_step_line("Cool, got the signed PSBT!", colr(6), curses_bold)
 
         if not self.test_tx_info:
             rpcw = self.config.rpc(self.cc_wallet)
             self.test_tx_info = _get_tx_info(rpcw, self.test_tx_hex)
 
         assert len(self.test_tx_info) == 2
-        self.new_step_line(f"  {self.test_tx_info[0]}", colr(0), bold)
-        self.new_step_line("Confirm send? [y/n]", colr(2), bold)
+        self.new_step_line(f"  {self.test_tx_info[0]}", colr(0), curses_bold)
+        self.new_step_line("Confirm send? [y/n]", colr(2), curses_bold)
 
         if not self.confirm_send:
             if key_y(k):
@@ -550,8 +672,10 @@ class SetupScene(Scene):
             else:
                 return wait()
 
-        self.new_step_line("Transaction broadcast!", colr(2), bold)
-        (waity2, waitx2) = self.new_step_line("Waiting for transaction", colr(4), bold)
+        self.new_step_line("Transaction broadcast!", colr(2), curses_bold)
+        (waity2, waitx2) = self.new_step_line(
+            "Waiting for transaction", colr(4), curses_bold
+        )
 
         if not self.receive_utxo2:
             scr.addstr(waity2, waitx2 + 1, self._get_scroller())
@@ -568,12 +692,14 @@ class SetupScene(Scene):
             f"Received amount of {self.receive_utxo2.amount} "
             f"({self.receive_utxo2.txid[:8]})",
             colr(5),
-            bold,
+            curses_bold,
             ypos=waity,
         )
         green_check(scr, testy, check_xpos)
 
-        self.new_step_line("Your wallet is good to go! Press q to exit.", colr(5), bold)
+        self.new_step_line(
+            "Your wallet is good to go! Press q to exit.", colr(5), curses_bold
+        )
 
         scr.move(self.height - 1, self.width - 1)
         # Refresh the screen
@@ -623,12 +749,12 @@ def draw_onboard(k: int) -> Action:
 
 
 def green_check(scr, y, x):
-    with attrs(scr, colr(5), bold):
+    with attrs(scr, colr(5), curses_bold):
         scr.addstr(y, x, "✔")
 
 
 def box(scr, y, x):
-    with attrs(scr, colr(2), bold):
+    with attrs(scr, colr(2), curses_bold):
         scr.addstr(y, x, "□")
 
 
@@ -636,8 +762,260 @@ def key_y(k: int):
     return k in {ord("y"), ord("Y"), 10, 13, curses.KEY_ENTER}
 
 
+def _s(window, y, x, msg, attr=0):
+    """A width-safe version of addstr."""
+    (_, width) = window.getmaxyx()
+    window.addstr(y, x, msg[:width], attr)
+
+
+class DashboardScene(Scene):
+    def __init__(self):
+        self.utxos = {}
+        self.threads = []
+        self.threads_started = False
+        self.new_addrs = []
+        self.blocks = []
+
+        self.conn_status = None
+        self.loop_count = 0
+
+    def start_threads(self):
+        if self.threads_started:
+            return
+
+        wall = self.wallet_configs[0]
+        t1 = threading.Thread(
+            target=_get_utxo_lines,
+            args=(self.config.rpc(wall), self.controller, self.utxos),
+        )
+        t1.start()
+        self.threads.append(t1)
+
+        t2 = threading.Thread(
+            target=_get_new_blocks,
+            args=(self.config.rpc(), self.blocks),
+        )
+        t2.start()
+        self.threads.append(t2)
+
+        self.threads_started = True
+        self.rpc = self.config.rpc()
+
+    def stop_threads(self):
+        stop_threads_event.set()
+        for thread in self.threads:
+            thread.join()
+
+    def draw(self, k: int) -> t.Tuple[int, Action]:
+        try:
+            return self._draw(k)
+        except Exception:
+            logger.exception("Dashboard curses barfed")
+            self.stop_threads()
+            raise
+
+        return (ord("q"), GoHome)
+
+    def _draw(self, k: int) -> t.Tuple[int, Action]:
+        scr = self.scr
+        self.height, self.width = scr.getmaxyx()
+        wall = self.wallet_configs[0]
+
+        substartx = 3
+        substarty = 2
+        sub_height = int(self.height * 0.45)
+
+        balwidth = max(int(self.width * 0.5), 61)
+        addrwidth = max(int(self.width * 0.4), 24)
+
+        self.start_threads()
+
+        self.balance_win = scr.derwin(sub_height, balwidth, substarty, substartx)
+        self.balance_win.border()
+        _s(self.balance_win, 0, 2, " UTXOs ")
+
+        _s(
+            self.balance_win,
+            2,
+            2,
+            f"{'address':<44}{'confs':>10}{'BTC':>12}",
+        )
+
+        with utxos_lock:
+            starty = 2
+            startx = 2
+            max_lines = sub_height - 2
+
+            _s(self.balance_win, starty, startx, "")
+            starty += 1
+
+            if max_lines < len(self.utxos):
+                _s(
+                    self.balance_win,
+                    starty,
+                    startx,
+                    "-- too many UTXOs to fit --",
+                    curses.A_BOLD,
+                )
+                starty += 1
+
+            sorted_utxos = sorted(self.utxos.values(), key=lambda u: -u.num_confs)[
+                -max_lines:
+            ]
+            total_bal = f"{sum([u.amount for u in sorted_utxos])}"
+            i = 0
+
+            for u in sorted_utxos:
+                line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
+                attrslist = []
+
+                if u.num_confs < 6:
+                    attrslist.extend([colr(3), curses_bold])
+
+                with attrs(self.balance_win, *attrslist):
+                    _s(self.balance_win, starty + i, startx, line)
+
+                i += 1
+
+            _s(
+                self.balance_win,
+                starty + i + 1,
+                startx,
+                f"{' ':<54}{total_bal:>12}",
+                curses.A_BOLD,
+            )
+
+        if k == ord("n"):
+            if len(self.new_addrs) < 10:
+                rpcw = self.config.rpc(wall)
+                self.new_addrs.append(rpcw.getnewaddress())
+
+        self.address_win = scr.derwin(
+            sub_height, addrwidth, substarty, substartx + balwidth + 1
+        )
+        self.address_win.box()
+        _s(self.address_win, 0, 2, " addresses ")
+        _s(self.address_win, 2, 2, "press 'n' to get new address", curses.A_ITALIC)
+
+        with utxos_lock:
+            utxo_addrs = {u.address for u in self.utxos.values()}
+            # Strip out used addresses.
+            self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
+
+            for i, addr in enumerate(self.new_addrs):
+                _s(self.address_win, 3 + i, 2, addr)
+
+        chainwin_height = int(self.height * 0.25)
+        chainwin_width = int(self.width * 0.9)
+
+        self.chain_win = scr.derwin(
+            chainwin_height, chainwin_width, substarty + sub_height, substartx
+        )
+        self.chain_win.box()
+        _s(self.chain_win, 0, 2, " chain status ")
+
+        max_history = chainwin_height - 4
+
+        if not self.conn_status or self.loop_count % 20 == 0:
+            try:
+                rpc = self.config.rpc()
+                netinfo = self.rpc.getnetworkinfo()
+            except Exception:
+                self.conn_status = warning_line("! couldn't connect to Bitcoin Core")
+            else:
+                ver = netinfo["subversion"].strip("/")
+                self.conn_status = (
+                    f"✔ connected to version {ver} at {rpc.host}:{rpc.port}"
+                )
+
+        _s(self.chain_win, 2, 3, self.conn_status)
+
+        with blocks_lock:
+            for i, b in enumerate(self.blocks[-max_history:]):
+                blockstr = (
+                    f"{b.time_saw} | block {b.height} (...{b.hash[-8:]}) - "
+                    f"{b.median_fee} sat/B - "
+                    f"{b.txs} txs - "
+                    f"subsidy: {b.subsidy / 100_000_000}"
+                )
+                _s(self.chain_win, 4 + i, 3, blockstr[:chainwin_width])
+
+        scr.refresh()
+
+        # scr.move(self.width, self.height)
+
+        scr.timeout(400)
+        next_k = scr.getch()
+        self.loop_count += 1
+
+        if next_k == ord("q"):
+            self.stop_threads()
+
+        return (next_k, GoDashboard)
+
+
+@dataclass
+class Block:
+    hash: str
+    height: int
+    time_saw: datetime.datetime
+    median_fee: float
+    subsidy: float
+    txs: int
+
+
+stop_threads_event = threading.Event()
+utxos_lock = threading.Lock()
+blocks_lock = threading.Lock()
+
+
+def _get_new_blocks(rpc, blocks):
+    last_saw = None
+
+    while True:
+        saw = rpc.getbestblockhash()
+
+        if saw != last_saw:
+            stats = rpc.getblockstats(saw)
+            with blocks_lock:
+                blocks.append(
+                    Block(
+                        saw,
+                        stats["height"],
+                        datetime.datetime.now(),
+                        stats["feerate_percentiles"][2],
+                        stats["subsidy"],
+                        stats["txs"],
+                    )
+                )
+            last_saw = saw
+
+        time.sleep(1)
+
+        if stop_threads_event.is_set():
+            return
+
+
+def _get_utxo_lines(rpcw, controller, utxos):
+    """
+    Poll constantly for new UTXOs.
+    """
+    while True:
+        new_utxos = controller.get_utxos(rpcw)
+
+        with utxos_lock:
+            utxos.clear()
+            utxos.update(new_utxos)
+
+        time.sleep(1)
+
+        if stop_threads_event.is_set():
+            return
+
+
 GoHome = Action()
 GoSetup = Action()
+GoDashboard = Action()
 Quit = Action()
 
 
@@ -661,6 +1039,9 @@ def draw_menu(scr, config, wallet_configs):
     setup = SetupScene()
     setup.set_configs(scr, config, wallet_configs)
 
+    dashboard = DashboardScene()
+    dashboard.set_configs(scr, config, wallet_configs)
+
     action = GoHome
     k = 0
 
@@ -670,14 +1051,13 @@ def draw_menu(scr, config, wallet_configs):
         height, width = scr.getmaxyx()
 
         # FIXME
-        scene = "h o m e"
 
         try:
             kstr = curses.keyname(k).decode()
         except ValueError:
             kstr = "???"
 
-        statusbarstr = f"Press 'q' to exit | {scene} | last keypress: {kstr} ({k})"
+        statusbarstr = f"Press 'q' to exit | never sell | last keypress: {kstr} ({k})"
         if k == -1:
             statusbarstr += " | waiting"
         # Render status bar
@@ -697,6 +1077,8 @@ def draw_menu(scr, config, wallet_configs):
             (k, action) = home.draw(k)
         elif action == GoSetup:
             (k, action) = setup.draw(k)
+        elif action == GoDashboard:
+            (k, action) = dashboard.draw(k)
 
         if k == ord("q") or action == Quit:
             break

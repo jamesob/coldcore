@@ -1,6 +1,6 @@
 import io
 
-from .main import CCWallet, WalletDescriptor
+from .main import CCWallet, WpkhDescriptor
 
 
 def test_parse_public():
@@ -16,12 +16,12 @@ def test_parse_public():
         "deriv_path": "/84h/0h",
         "xpub": "xpub6BUBVXTHPtiWZuJT7ZVArTEXi5FcGNX4d4TMLTuRSCcVEQ37BASyq17BoSBxwLgaVBvyR9GbtnVeKhAAwdmqHppzrukRk55XHgc32idASq2",
         "descriptors": [
-            WalletDescriptor(
+            WpkhDescriptor(
                 base="wpkh([3d88d0cf/84h/0h]xpub6BUBVXTHPtiWZuJT7ZVArTEXi5FcGNX4d4TMLTuRSCcVEQ37BASyq17BoSBxwLgaVBvyR9GbtnVeKhAAwdmqHppzrukRk55XHgc32idASq2/0/*)",
                 checksum="deadbeef",
                 is_change=False,
             ),
-            WalletDescriptor(
+            WpkhDescriptor(
                 base="wpkh([3d88d0cf/84h/0h]xpub6BUBVXTHPtiWZuJT7ZVArTEXi5FcGNX4d4TMLTuRSCcVEQ37BASyq17BoSBxwLgaVBvyR9GbtnVeKhAAwdmqHppzrukRk55XHgc32idASq2/1/*)",
                 checksum="deadbeef",
                 is_change=True,
@@ -52,6 +52,28 @@ def test_parse_public():
             },
         ],
     )
+
+    wall_testnet = CCWallet.from_io(io.StringIO(testnet1), MockRPC())
+
+    assert wall_testnet.__dict__ == {
+        "fingerprint": "f0ccde95",
+        "deriv_path": "/84h/1h/0h",
+        "xpub": "tpubDCmmTK7n4vhofN8wuc5ioZcm9egBgwTRN7BRbpg8AHdLqA3TkyjkuvFbrymQBDHBNEvop6KFqHH1SCP1Qe9u55U2fzpvg9jLqhEPEHuTAt4",
+        "descriptors": [
+            WpkhDescriptor(
+                base="wpkh([f0ccde95/84h/1h/0h]tpubDCmmTK7n4vhofN8wuc5ioZcm9egBgwTRN7BRbpg8AHdLqA3TkyjkuvFbrymQBDHBNEvop6KFqHH1SCP1Qe9u55U2fzpvg9jLqhEPEHuTAt4/0/*)",
+                checksum="deadbeef",
+                is_change=False,
+            ),
+            WpkhDescriptor(
+                base="wpkh([f0ccde95/84h/1h/0h]tpubDCmmTK7n4vhofN8wuc5ioZcm9egBgwTRN7BRbpg8AHdLqA3TkyjkuvFbrymQBDHBNEvop6KFqHH1SCP1Qe9u55U2fzpvg9jLqhEPEHuTAt4/1/*)",
+                checksum="deadbeef",
+                is_change=True,
+            ),
+        ],
+        "earliest_block": None,
+        "bitcoind_json_url": None,
+    }
 
 
 # noqa: E501
@@ -152,3 +174,76 @@ m/84'/0'/0'/0/2 => bc1qgaqzjdnztrle7v4qg3yvnwnu5rndpkdn3gftxm
 m/84'/0'/0'/0/3 => bc1qc703cjt0jvx2adsjfhg2dcfp8k34j76xymkqdl
 m/84'/0'/0'/0/4 => bc1qk3ru377gs5wj0e8psyse2jrwxn5jym3kx8ufla
     """
+
+testnet1 = """
+# Coldcard Wallet Summary File
+## For wallet with master key fingerprint: F0CCDE95
+
+Wallet operates on blockchain: Bitcoin Testnet
+
+For BIP44, this is coin_type '1', and internally we use
+symbol XTN for this blockchain.
+
+## IMPORTANT WARNING
+
+Do **not** deposit to any address in this file unless you have a working
+wallet system that is ready to handle the funds at that address!
+
+## Top-level, 'master' extended public key ('m/'):
+
+tpubD6NzVbkrYhZ4WTS6a1w2bMvnQLu5fFx2WFQYYshfaybZ38hhB1R4pEpcqtR6XQnGNqnZqdxzM2Zu9voRejsUFXGrUP2dDmFdQM6VH1dxjxy
+
+What follows are derived public keys and payment addresses, as may
+be needed for different systems.
+
+
+## For Electrum (not BIP44): m/{change}/{idx}
+
+First 5 receive addresses (account=0, change=0):
+
+m => tpubD6NzVbkrYhZ4WTS6a1w2bMvnQLu5fFx2WFQYYshfaybZ38hhB1R4pEpcqtR6XQnGNqnZqdxzM2Zu9voRejsUFXGrUP2dDmFdQM6VH1dxjxy
+m/0/0 => mtdRRTkhiR5F36qQEKrhEqiwgDZJTAo4KL
+m/0/1 => mu99LL68Qjg836KStipjZhtiWrCUs5F4zt
+m/0/2 => mmvRCw8ViHxXKLPT9E28EjM5eHUKg7X7fo
+m/0/3 => mmjrC3Zx9SsJULVgeDpQ8S5ip7aRHa6TdD
+m/0/4 => mqdhidRoF7UK7rSWzzpA2jw2qKA6JNtXP7
+
+
+## For BIP44 / Electrum: m/44'/1'/{account}'/{change}/{idx}
+
+First 5 receive addresses (account=0, change=0):
+
+m/44'/1'/0' => tpubDDm5E3x41M3Atm6EdxuiDHNUPHFHFDbNuVX3cDeHiMsDmXpUA8WgJX3rmJ5yz6K8X7oRUAUsHnK9iKXEiSw5mfTmHG1J6886gpkLrRC7Jyr
+m/44'/1'/0'/0/0 => mqX6Huj8JNKCzmvGEWkZANQn9wKHAS1fdj
+m/44'/1'/0'/0/1 => mviw38chcm8rzBs5TEmgEQnkBqutcrdf9X
+m/44'/1'/0'/0/2 => mukeH2vf4ZXVJ2xbLRsMQMda9x5E6FsauZ
+m/44'/1'/0'/0/3 => mguijy6L91dcSAzSZCypxJaWHP9EKq6o6R
+m/44'/1'/0'/0/4 => mp8XQPxD9wHroMWQwEFuNhQWcCRXriSB7s
+
+
+## For BIP49 (P2WPKH-nested-in-P2SH): m/49'/1'/{account}'/{change}/{idx}
+
+First 5 receive addresses (account=0, change=0):
+
+m/49'/1'/0' => tpubDDeZsDGecR2h5BR1ySLrpNFzq83ph4oCt9cBzLiKPrCzVqHEXjMmLH2kUqocksLmFVkF9pqMbtrb2Hsm7M9MtJSawkV2mtjjE1ZRdU7iVK4
+m/49'/1'/0' => upub5En9RySDT6SoFVep2AztzBe7z6WpspKebBTEHbyWuvKTbFAqhY1zKePWBBr5EeRmEfrvHpXogoxtgFYTZQ45c9wVH8eTLdd2psn5himfpfk   ##SLIP-132##
+m/49'/1'/0'/0/0 => 2N4d2KghiPmGmvLn9wpHCLm8hyWaFY2cezA
+m/49'/1'/0'/0/1 => 2NDFVTNLShuVYN6hmQTCxE9fBeCJqvXYV6t
+m/49'/1'/0'/0/2 => 2NDqbEmmGKhP8AWjRznj5fZzNe3Zqvdx3MF
+m/49'/1'/0'/0/3 => 2NGAP5QVwGLZGMZvkH2AJyisqU46EpqDWFP
+m/49'/1'/0'/0/4 => 2N4f3qK2dNNuTRyemCDs8Qhe83jZyk1uBbp
+
+
+## For BIP84 (Native Segwit P2WPKH): m/84'/1'/{account}'/{change}/{idx}
+
+First 5 receive addresses (account=0, change=0):
+
+m/84'/1'/0' => tpubDCmmTK7n4vhofN8wuc5ioZcm9egBgwTRN7BRbpg8AHdLqA3TkyjkuvFbrymQBDHBNEvop6KFqHH1SCP1Qe9u55U2fzpvg9jLqhEPEHuTAt4
+m/84'/1'/0' => vpub5YjcKjxG4HfPgyZrnhXPBU6PUbHdpJyMzFYggUqD4N7gyfkJBSZYXMGVaXmSeu26m4AHhZcGNrjrySfGaPUdbAeXsigmpoS8iHWgh9D1nB6   ##SLIP-132##
+m/84'/1'/0'/0/0 => tb1qm58ffex57zsacpdaar996xepcp5egmh2h8p2tr
+m/84'/1'/0'/0/1 => tb1q4zsq0s7kp52vnshm73ff5kp6p70e0s8y069usu
+m/84'/1'/0'/0/2 => tb1qauf8awghs8pcv3cu4us43uzuf9jzk63kdp457e
+m/84'/1'/0'/0/3 => tb1q5rdc078nn7vfu6fkxexwcfarm4mwwrt4l6jhte
+m/84'/1'/0'/0/4 => tb1q7m5wwdyhewcagz7lz3730pqj455fw45k4r740r
+
+"""

@@ -31,6 +31,7 @@ import time
 import textwrap
 import json
 import io
+import os
 from pathlib import Path
 from typing import Optional as Op
 from dataclasses import dataclass, field
@@ -361,14 +362,10 @@ class BaseProxy(object):
         btc_conf_file=None,
         net_name=None,
         timeout=DEFAULT_HTTP_TIMEOUT,
-        connection=None,
         debug_stream: Op[IO] = None,
         wallet_name=None,
     ):
 
-        # Create a dummy connection early on so if __init__() fails prior to
-        # __conn being created __del__() can detect the condition and handle it
-        # correctly.
         self.debug_stream = debug_stream
         authpair = None
         net_name = net_name or "mainnet"
@@ -411,10 +408,10 @@ class BaseProxy(object):
                     "mainnet": 8332,
                 }.get(net_name, 18332)
 
-            conf["rpcport"] = int(conf.get("rpcport", service_port))
+            conf["rpcport"] = int(conf.get("rpcport", service_port))  # type: ignore
             conf["rpchost"] = conf.get("rpcconnect", "localhost")
 
-            service_url = "%s://%s:%d" % ("http", conf["rpchost"], conf["rpcport"])
+            service_url = f"http://{conf['rpchost']}:{conf['rpcport']}"
 
             cookie_dir = conf.get("datadir", os.path.dirname(btc_conf_file))
             if net_name != "mainnet":
@@ -423,10 +420,9 @@ class BaseProxy(object):
             try:
                 with open(cookie_file, "r") as fd:
                     authpair = fd.read()
-            except IOError as err:
+            except (IOError, FileNotFoundError) as err:
                 if "rpcpassword" in conf:
                     authpair = "%s:%s" % (conf["rpcuser"], conf["rpcpassword"])
-
                 else:
                     raise ValueError(
                         "Cookie file unusable (%s) and rpcpassword not specified "
@@ -1217,7 +1213,7 @@ class SetupScene(Scene):
             rpcw = self.config.rpc(self.cc_wallet)
             self.test_tx_info = _get_tx_info(rpcw, self.test_tx_hex)
 
-        assert len(self.test_tx_info) == 1
+        assert len(self.test_tx_info) == 2
         self.new_step_line(f"  {self.test_tx_info[0]}", colr(0), bold)
         self.new_step_line("Confirm send? [y/n]", colr(2), bold)
 
@@ -1401,12 +1397,6 @@ def start_ui(config, wallet_configs):
 
 root_logger = logging.getLogger()
 logger = logging.getLogger("main")
-formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s - %(message)s")
-log_filehandler = logging.FileHandler("coldcore.log")
-log_filehandler.setLevel(logging.DEBUG)
-log_filehandler.setFormatter(formatter)
-logger.addHandler(log_filehandler)
-logger.setLevel(logging.DEBUG)
 
 BitcoinRPC = RawProxy
 
@@ -1416,8 +1406,23 @@ TESTNET = "testnet3"
 
 cli = App()
 cli.add_arg("--verbose", "-v", action="store_true", default=False)
-cli.add_arg("--config", "-c", action="store", default=None)
+cli.add_arg(
+    "--config",
+    "-c",
+    action="store",
+    default=None,
+    help=(
+        "Path to config file. Can be a `pass:Path/To/Config` or "
+        "a filename ending in .gpg."
+    ),
+)
 cli.add_arg("--debug", "-d", action="store_true", default=False)
+cli.add_arg(
+    "--testnet",
+    action="store_true",
+    default=False,
+    help="Try to connect on the testnet network initially instead of mainnet.",
+)
 
 
 CONFIG_DIR = Path.home() / ".config" / "coldcore"
@@ -1425,21 +1430,47 @@ DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.ini"
 PASS_PREFIX = "pass:"
 
 
-def setup_logging():
+def setup_logging() -> Op[Path]:
+    """
+    Configure logging; only log when --debug is enabled to prevent unintentional
+    data leaks.
+
+    Returns a path to the logfile if one is being used.
+    """
+    # TODO base this on config?
+    log_path = "coldcore.log"
+    formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s - %(message)s")
+    log_filehandler = logging.FileHandler(log_path)
+    log_filehandler.setLevel(logging.DEBUG)
+    log_filehandler.setFormatter(formatter)
+
     if cli.args.debug:
         root_logger.setLevel(logging.DEBUG)
-        root_logger.addHandler(logging.StreamHandler())
         root_logger.addHandler(log_filehandler)
+        logger.setLevel(logging.DEBUG)
+        return Path(log_path)
+
+    return None
 
 
 @dataclass
 class Wallet:
+    """
+    In-memory representation of a single BIP32 HD wallet. Often but not necessarily
+    backed by a hardware wallet.
+    """
+
     fingerprint: str
     deriv_path: str
     xpub: str
-    descriptors: t.List["WalletDescriptor"] = field(default_factory=list)
+    # TODO at some point we'll support non-WPKH descriptors.
+    descriptors: t.List["WpkhDescriptor"] = field(default_factory=list)
     earliest_block: Op[int] = None
     bitcoind_json_url: Op[str] = None
+
+    # If given, this was loaded from an external storage mechanism (e.g. pass, gpg).
+    # Respect this when translating back to INI.
+    loaded_from: Op[str] = None
 
     @property
     def name(self):
@@ -1484,6 +1515,10 @@ class Wallet:
 
     @property
     def as_ini_dict(self) -> t.Dict:
+        if self.loaded_from:
+            # TODO it's incumbent upon the user to maintain this themmselves?
+            return {"load_from": self.loaded_from}
+
         checksums = {}
         for d in self.descriptors:
             checksums.update(d.change_to_checksum)
@@ -1500,9 +1535,7 @@ class Wallet:
     @property
     def loaded_xpub(self):
         if not hasattr(self, "__loaded_xpub"):
-
             self.__loaded_xpub = self.__loaded_xpub.strip()
-
         return self.__loaded_xpub
 
     @classmethod
@@ -1514,12 +1547,14 @@ class Wallet:
             content = ""
             if load_from.startswith(PASS_PREFIX):
                 passpath = load_from.split(PASS_PREFIX, 1)[-1]
-                print("Retrieving coldcard info from pass...", file=sys.stderr)
-                content = get_stdout(f"pass show {passpath}").decode()
+                content = Pass().read(passpath)  # type: ignore
             elif load_from.endswith(".gpg"):
-                content = get_stdout(f"gpg -d {load_from}").decode()
+                content = GPG().read(load_from)  # type: ignore
             else:
                 raise ValueError(f"from directive unrecognized: {load_from}")
+
+            if not content:
+                raise ValueError(f"failed to retrieve config from {load_from}")
 
             conf2 = ConfigParser()
             conf2.read_string(content)
@@ -1538,7 +1573,7 @@ class Wallet:
             raise ValueError(f"unexpected checksum map contents: {checksum_map}")
 
         descs = [
-            WalletDescriptor.from_conf(
+            WpkhDescriptor.from_conf(
                 fp,
                 deriv_path,
                 xpub,
@@ -1548,10 +1583,16 @@ class Wallet:
             for is_change in [False, True]
         ]
 
-        return cls(fp, deriv_path, xpub, descs, earliest_block, url)
+        return cls(
+            fp, deriv_path, xpub, descs, earliest_block, url, loaded_from=load_from
+        )
 
 
 class CCWallet(Wallet):
+    """
+    A wallet whose private key lives on a Coldcard device.
+    """
+
     @property
     def name(self):
         return f"coldcard-{self.fingerprint.lower()}"
@@ -1577,8 +1618,9 @@ class CCWallet(Wallet):
         for idx, line in enumerate(as_lines):
             if "'master' extended public key" in line:
                 masterpubkey = as_lines[idx + 2].strip()
-                if not masterpubkey.startswith(xpub_prefix):
-                    raise ValueError("file format unexpected: master key")
+
+        if not masterpubkey.startswith(xpub_prefix):
+            raise ValueError("file format unexpected: master key")
 
         # We don't do anything with the masterpubkey other than compute a
         # fingerprint based on it.
@@ -1615,7 +1657,7 @@ class CCWallet(Wallet):
 
         xpub: str = xpub_prefix + m2.groupdict()["xpub"]
 
-        def desc_to_checksum(desc: WalletDescriptor) -> str:
+        def desc_to_checksum(desc: WpkhDescriptor) -> str:
             try:
                 return rpc.getdescriptorinfo(desc.base)["checksum"]
             except JSONRPCError:
@@ -1624,7 +1666,7 @@ class CCWallet(Wallet):
 
         descs = []
         for is_change in [False, True]:
-            desc = WalletDescriptor.from_conf(
+            desc = WpkhDescriptor.from_conf(
                 fp, deriv_path, xpub, is_change=is_change, checksum=""
             )
             desc.checksum = desc_to_checksum(desc)
@@ -1640,10 +1682,11 @@ class CCWallet(Wallet):
 
 
 @dataclass
-class WalletDescriptor:
-    # Without checksum
+class WpkhDescriptor:
+    # The descriptor without the checksum.
     base: str
     checksum: str
+    # Does this descriptor correspond to a change wallet?
     is_change: bool
 
     @property
@@ -1663,14 +1706,10 @@ class WalletDescriptor:
         xpub: str,
         is_change: bool,
         checksum: str,
-    ) -> "WalletDescriptor":
-        base = mk_desc(fingerprint.lower(), deriv_path, xpub, 1 if is_change else 0)
+    ) -> "WpkhDescriptor":
+        change = 1 if is_change else 0
+        base = f"wpkh([{fingerprint.lower()}{deriv_path}]{xpub}/{change}/*)"
         return cls(base, checksum, is_change)
-
-
-def mk_desc(fingerprint: str, deriv_path: str, xpub: str, change: int) -> str:
-    """Return a script descriptor for some part of the wallet."""
-    return f"wpkh([{fingerprint}{deriv_path}]{xpub}/{change}/*)"
 
 
 @dataclass
@@ -1696,18 +1735,10 @@ class UTXO:
 
 
 class WizardController:
+    """Used to proxy logic into the terminal UI."""
+
     def create_config(self) -> "GlobalConfig":
-        if not CONFIG_DIR.exists():
-            # FIXME macOS
-            CONFIG_DIR.mkdir(mode=0o700, parents=True)
-
-        if not DEFAULT_CONFIG_PATH.exists():
-            with open(DEFAULT_CONFIG_PATH, "w") as f:
-                GlobalConfig.write_blank(f)
-
-        cf = ConfigParser()
-        cf.read(DEFAULT_CONFIG_PATH)
-        return GlobalConfig.from_ini(str(DEFAULT_CONFIG_PATH), cf)[0]
+        return _get_config()[0]
 
     def parse_cc_public(self, contents: str, rpc: BitcoinRPC) -> CCWallet:
         return CCWallet.from_io(io.StringIO(contents), rpc)
@@ -1744,6 +1775,8 @@ def discover_rpc(config: "GlobalConfig") -> Op[BitcoinRPC]:
 
 @dataclass
 class GlobalConfig:
+    """Coldcore-specific configuration."""
+
     loaded_from: str
     raw_config: ConfigParser
     bitcoind_json_url: Op[str] = None
@@ -1753,6 +1786,16 @@ class GlobalConfig:
     wizard_controller: WizardController = WizardController()
 
     disable_echo: bool = False
+
+    # If true, skip anything that would block on user input.
+    no_interaction: bool = False
+
+    # Which GPG key should we encrypt with?
+    # See: gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
+    gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
+
+    try_testnet: bool = False
+
     _rpc_cache: t.Dict[str, BitcoinRPC] = field(default_factory=dict)
 
     def echo(self, *args, **kwargs):
@@ -1770,42 +1813,56 @@ class GlobalConfig:
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
         wallet_name = wallet.name if wallet else ""
 
-        if wallet_name not in self._rpc_cache:
-            if not wallet:
-                self._rpc_cache[wallet_name] = self._rpc(**kwargs)
-            else:
-                plain_rpc = self._rpc(net_name=wallet.net_name, **kwargs)
-                try:
-                    # We have to ensure the wallet is loaded before accessing its
-                    # RPC.
-                    plain_rpc.loadwallet(wallet.name)
-                except JSONRPCError as e:
-                    # Wallet already loaded.
-                    if e.error.get("code") != -4:  # type: ignore
-                        raise
-                self._rpc_cache[wallet_name] = self._rpc(
-                    net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
-                )
+        if wallet_name in self._rpc_cache:
+            return self._rpc_cache[wallet_name]
+
+        if not wallet:
+            self._rpc_cache[wallet_name] = self._rpc(**kwargs)
+        else:
+            plain_rpc = self._rpc(net_name=wallet.net_name, **kwargs)
+            try:
+                # We have to ensure the wallet is loaded before accessing its
+                # RPC.
+                plain_rpc.loadwallet(wallet.name)
+            except JSONRPCError as e:
+                # Wallet already loaded.
+                if e.error.get("code") != -4:  # type: ignore
+                    raise
+            self._rpc_cache[wallet_name] = self._rpc(
+                net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
+            )
         return self._rpc_cache[wallet_name]
 
     def _rpc(self, timeout: int = (60 * 5), **kwargs) -> BitcoinRPC:
-        return BitcoinRPC(
-            self.bitcoind_json_url,
-            timeout=timeout,
-            debug_stream=(sys.stderr if cli.args.debug else None),
-            **kwargs,
-        )
+        kwargs.setdefault("net_name", TESTNET if self.try_testnet else MAINNET)
+        try:
+            return BitcoinRPC(
+                self.bitcoind_json_url,
+                timeout=timeout,
+                debug_stream=(sys.stderr if cli.args.debug else None),
+                **kwargs,
+            )
+        except Exception:
+            logger.exception("failed to connect to bitcoin core JSON RPC server")
+            # self.err(f"Hit error connecting to Bitcoin Core: '{str(e)}'")
+            self.err(
+                "Unable to connect to Bitcoin Core. Is it running and configured "
+                "to offer an RPC server? "
+                "See: https://en.bitcoin.it/wiki/API_reference_(JSON-RPC)"
+            )
+            sys.exit(1)
 
     @classmethod
     def from_ini(
         cls, loaded_from: str, conf: ConfigParser
-    ) -> t.Tuple["GlobalConfig", t.List["Wallet"]]:
+    ) -> t.Tuple["GlobalConfig", t.List[Wallet]]:
         sect = conf["default"]
         c = cls(
             loaded_from,
             conf,
             sect.get("bitcoind_json_url", None),
             sect.get("default_wallet"),
+            try_testnet=cli.args.testnet,
         )
         wallets = []
 
@@ -1832,28 +1889,27 @@ class GlobalConfig:
 
         return (c, wallets)
 
+    BLANK_CONF = textwrap.dedent(
+        """
+        [default]
+
+        # If blank, this will default to something like
+        #   http://localhost:8332
+        # You can specify non-localhosts like
+        #   http://your_rpc_user:rpcpassword@some_host:8332/
+        bitcoind_json_url =
+
+        # This corresponds to one of the wallet sections listed below,
+        # and will be used for commands where a single wallet is required
+        # but unspecified.
+        default_wallet =
+        """
+    )
+
     @classmethod
     def write_blank(cls, outfile: t.IO):
         """Write a blank configuration file."""
-        outfile.write(
-            textwrap.dedent(
-                """
-            [default]
-
-            # If blank, this will default to something like
-            #   http://localhost:8332
-            # You can specify non-localhosts like
-            #   http://your_rpc_user:rpcpassword@some_host:8332/
-            bitcoin_json_url =
-
-            # This corresponds to one of the wallet sections listed below,
-            # and will be used for commands where a single wallet is required
-            # but unspecified.
-            default_wallet =
-            """
-            )
-        )
-
+        outfile.write(cls.BLANK_CONF)
         p = Path(outfile.name)
 
         # Ensure that the created file is only readable by the owner.
@@ -1868,16 +1924,33 @@ class GlobalConfig:
     def write(self):
         """Save the contents of this config to an INI file on disk."""
         if self.loaded_from.startswith(PASS_PREFIX):
-            raise ValueError("can't write config back to pass")
+            to_path = self.loaded_from.split(PASS_PREFIX)[-1]
+            passobj = Pass()
+            content = io.StringIO()
+            self.raw_config.write(content)
+            content.seek(0)
+            passobj.write(to_path, content.read())
 
-        with open(self.loaded_from, "w") as f:
-            self.raw_config.write(f)
+        elif self.loaded_from.endswith(".gpg"):
+            gpg = GPG()
+            content = io.StringIO()
+            self.raw_config.write(content)
+            content.seek(0)
+            gpg.write(self.loaded_from, content.read())
+
+        else:
+            with open(self.loaded_from, "w") as f:
+                self.raw_config.write(f)
+
+        logger.info(f"Wrote configuration to {self.loaded_from}")
 
 
-def get_stdout(*args, **kwargs) -> bytes:
+def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
+    """Return (returncode, stdout as bytes)."""
     kwargs["shell"] = True
     kwargs["capture_output"] = True
-    return subprocess.run(*args, **kwargs).stdout
+    result = subprocess.run(*args, **kwargs)
+    return (result.returncode, result.stdout)
 
 
 def _sh(*args, **kwargs) -> subprocess.CompletedProcess:
@@ -1971,6 +2044,15 @@ def _psbt_to_tx_hex(rpcw: BitcoinRPC, psbt_path: Path) -> str:
     raise ValueError("unrecognized signed PSBT format")
 
 
+def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
+    try:
+        got = rpc.decoderawtransaction(tx_hex)
+        assert got["txid"]
+    except Exception:
+        return False
+    return True
+
+
 def _confirm_broadcast(config: GlobalConfig, rpcw: BitcoinRPC, hex_val: str) -> bool:
     """Display information about the transaction to be performed and confirm."""
     info = rpcw.decoderawtransaction(hex_val)
@@ -2005,16 +2087,54 @@ def _broadcast(config: GlobalConfig, rpcw: BitcoinRPC, tx_hex: str):
     config.echo(rpcw.sendrawtransaction(tx_hex))
 
 
+def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
+    inppath = Path(inp)
+    if inp == "-":
+        content = io.StringIO(sys.stdin.read())
+    elif inppath.exists():
+        content = io.StringIO(Path(inp).read_text())
+    else:
+        raise ValueError(f"input path {inppath} can't be read")
+
+    return CCWallet.from_io(content, rpc)
+
+
 @cli.cmd
-def setup():
-    """Run initial setup for a wallet."""
-    config, [wall] = get_config()
+def setup(public_wallet_data: str):
+    """
+    Run initial setup for a wallet.
+
+    Args:
+        public_wallet_data: path to Coldcard's public.txt or '-' to read from stdin
+    """
+    # TODO allow passing bitcoin core RPC addr
+    (config, _) = _get_config()
     rpc = config.rpc()
+
+    wall = _wallet_from_input(public_wallet_data, rpc)
     rpcw = config.rpc(wall)
+
+    config.echo(f"Adding new wallet '{wall.name}' to config at '{config.loaded_from}'")
+    config.add_new_wallet(wall)
+    config.write()
 
     rpc_wallet_create(rpc, wall)
     config.echo(rpcw.importmulti(*wall.importmulti_args()))
-    config.echo(rpcw.rescanblockchain(610000))
+
+    rpcw = config.rpc(wall, timeout=10000)
+    config.echo("Scanning the UTXO set...")
+    scan_results = rpcw.scantxoutset(*wall.scantxoutset_args())
+
+    unspents = scan_results["unspents"]
+    bal = sum([i["amount"] for i in unspents])
+    config.echo(f"Found an existing balance of {bal} BTC across {len(unspents)} UTXOs")
+
+    rescan_begin_height = min([i["height"] for i in unspents])
+    config.echo(
+        f"Beginning chain rescan from {rescan_begin_height}. "
+        "This will take minutes to hours."
+    )
+    config.echo(rpcw.rescanblockchain(rescan_begin_height))
     # TODO: above call will block. run in thread and poll with getwalletinfo.
     return True
 
@@ -2022,7 +2142,7 @@ def setup():
 @cli.cmd
 def watch():
     """Watch activity related to your wallets."""
-    config, [wall] = get_config()
+    (config, (wall, *_)) = _get_config()
     rpcw = config.rpc(wall)
 
     utxos = get_utxos(rpcw)
@@ -2055,7 +2175,7 @@ def watch():
 @cli.cmd
 def balance():
     """Check your wallet balances."""
-    config, [wall] = get_config()
+    (config, (wall, *_)) = _get_config()
     rpcw = config.rpc(wall)
     utxos = UTXO.from_listunspent(rpcw.listunspent(0))  # includes unconfirmed
     utxos = sorted(utxos, key=lambda u: -u.num_confs)
@@ -2078,7 +2198,7 @@ def prepare_send(to_address: str, amount: str, spend_from: str = ""):
         amount: amount to send in BTC
         spend_from: comma-separated addresses to pull unspents from as inputs
     """
-    config, [wall] = get_config()
+    (config, (wall, *_)) = _get_config()
     rpcw = config.rpc(wall)
     spend_from_list = spend_from.split(",") if spend_from else None
 
@@ -2088,7 +2208,7 @@ def prepare_send(to_address: str, amount: str, spend_from: str = ""):
 @cli.cmd
 def broadcast(signed_psbt_path: Path):
     """Broadcast a signed PSBT."""
-    config, [wall] = get_config()
+    (config, (wall, *_)) = _get_config()
     rpcw = config.rpc(wall)
     hex_val = _psbt_to_tx_hex(rpcw, signed_psbt_path)
     assert hex_val
@@ -2102,7 +2222,7 @@ def broadcast(signed_psbt_path: Path):
 
 @cli.cmd
 def newaddr():
-    config, [wall] = get_config()
+    (config, (wall, *_)) = _get_config()
     rpcw = config.rpc(wall)
     config.echo(rpcw.getnewaddress())
 
@@ -2110,44 +2230,168 @@ def newaddr():
 @cli.cmd
 def ui():
     """Start a curses UI."""
-    config, walls = get_config()
+    config, walls = _get_config()
     config.disable_echo = True
-    log_filehandler.setLevel(logging.DEBUG)
-    root_logger.handlers = [log_filehandler]
     start_ui(config, walls)
 
 
-def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
+class Pass:
+    """Access to pass, the password store."""
+
+    @classmethod
+    def write(cls, path: str, content: str) -> bool:
+        """Return True if write successful."""
+        # TODO maybe detect whether or not we're overwriting and warn
+        logger.info(f"Writing to pass: {path}")
+        proc = subprocess.Popen(
+            f"pass insert -m -f {path}",
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.communicate(content.encode())
+        return proc.returncode == 0
+
+    @classmethod
+    def read(self, path: str, action: str = "Requesting to read") -> Op[str]:
+        """Return None if path doesn't exist."""
+        print(f"{action} from pass: {path}")
+        logger.info(f"Reading from pass: {path}")
+        retcode, conf_str = _get_stdout(f"pass show {path}")
+        if retcode != 0:
+            return None
+        return conf_str.decode().strip()
+
+
+class GPG:
+    """Access to GPG."""
+
+    @classmethod
+    def write(self, path: str, content: str) -> bool:
+        """Return True if write successful."""
+        logger.info(f"Writing to GPG: {path}")
+        gpg_key = os.environ.get("COLDCORE_GPG_KEY", _find_gpg_default_key())
+        assert gpg_key
+
+        with open(path, "w") as f:
+            proc = subprocess.Popen(
+                f"gpg -e -r {gpg_key}", shell=True, stdout=f, stdin=subprocess.PIPE
+            )
+            proc.communicate(content.encode())
+
+        return proc.returncode == 0
+
+    @classmethod
+    def read(self, path: str) -> Op[str]:
+        p = Path(path)
+        if not p.exists():
+            logger.warning(f"tried to read from GPG path {p} that doesn't exist")
+            return None
+
+        (retcode, content) = _get_stdout(f"gpg -d {p}")
+
+        if retcode == 0:
+            return content.decode().strip()
+
+        logger.warning(f"failed to read GPG path {p}, returncode: {retcode}")
+        return None
+
+
+def _find_gpg_default_key() -> Op[str]:
+    """Get the GPG default-key to encrypt with."""
+    gpg_conf_path = Path.home() / ".gnupg" / "gpg.conf"
+    gpg_conf_lines = []
     try:
-        got = rpc.decoderawtransaction(tx_hex)
-        assert got["txid"]
-    except Exception:
-        return False
-    return True
+        gpg_conf_lines = gpg_conf_path.read_text().splitlines()
+    except FileNotFoundError:
+        pass
+
+    default_key_line = None
+    try:
+        [default_key_line] = [
+            line for line in gpg_conf_lines if line.startswith("default-key ")
+        ]
+    except ValueError:
+        pass
+
+    if not default_key_line:
+        raise RuntimeError(
+            f"Must set `default-key` in {gpg_conf_path} or "
+            "use COLDCORE_GPG_KEY envvar, otherwise don't know "
+            "what to encrypt with.",
+        )
+        return None
+
+    return default_key_line.split("default-key ")[-1]
 
 
-def get_config(
+def _get_config(
     wallet_names: Op[t.List[str]] = None,
 ) -> t.Tuple[GlobalConfig, t.List[Wallet]]:
+    """
+    Load in coldcore config from some source.
+
+    Return the config and a list of loaded wallets. The config's default_wallet will
+    be the first item in the list.
+    """
     confp = ConfigParser()
-    conf_path = cli.args.config or DEFAULT_CONFIG_PATH
+    conf_path = str(
+        cli.args.config or os.environ.get("COLDCORE_CONFIG", DEFAULT_CONFIG_PATH)
+    )
 
     # TODO this is okay for right now, but maybe think about making this less
     # automatic and more explicit.
-    if conf_path == DEFAULT_CONFIG_PATH and not DEFAULT_CONFIG_PATH.exists():
+    if Path(conf_path) == DEFAULT_CONFIG_PATH and not DEFAULT_CONFIG_PATH.exists():
+        if not CONFIG_DIR.exists():
+            # FIXME macOS
+            CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         logger.info(f"Creating blank configuration at {DEFAULT_CONFIG_PATH}")
         with open(DEFAULT_CONFIG_PATH, "w") as f:
             GlobalConfig.write_blank(f)
 
     # Optionally, read the configuration from `pass`.
-    if str(conf_path).startswith(PASS_PREFIX):
-        passname = str(conf_path).split(PASS_PREFIX, 1)[-1]
-        conf_str = get_stdout(f"pass show {passname}").decode()
-        confp.read_string(conf_str)
+    elif conf_path.startswith(PASS_PREFIX):
+        passobj = Pass()
+        passpath = conf_path.split(PASS_PREFIX, 1)[-1]
+        contents = passobj.read(passpath, action="Requesting to load configuration INI")
+
+        if not contents:
+            msg = f"Creating blank configuration at {conf_path}"
+            logger.info(msg)
+            print(msg)
+            # config doesn't exist, so insert it
+            if not passobj.write(passpath, GlobalConfig.BLANK_CONF):
+                print(f"Failed to write new configuration to {conf_path}")
+                sys.exit(1)
+
+            contents = GlobalConfig.BLANK_CONF
+
+        confp.read_string(contents)
+
+    # Or read from GPG
+    elif conf_path.endswith(".gpg"):
+        gpg = GPG()
+        contents = gpg.read(conf_path)
+
+        if not contents:
+            msg = f"Creating blank configuration at {conf_path}"
+            logger.info(msg)
+            print(msg)
+            # config doesn't exist, so insert it
+            gpg.write(conf_path, GlobalConfig.BLANK_CONF)
+            contents = GlobalConfig.BLANK_CONF
+
+        confp.read_string(contents)
+
     # Or just read it from some file path.
     else:
         confp.read(conf_path)
+
     (conf, wallet_confs) = GlobalConfig.from_ini(str(conf_path), confp)
+
+    logger.debug("loaded with config: %s", conf)
+    logger.debug("loaded with wallets: %s", wallet_confs)
 
     unrecog_wallets = set(wallet_names or []) - set(w.name for w in wallet_confs)
     if unrecog_wallets:
@@ -2157,10 +2401,21 @@ def get_config(
     if wallet_names:
         wallet_confs = [w for w in wallet_confs if w.name in wallet_names]
 
+    # Return the default wallet first.
+    wallet_confs = sorted(
+        wallet_confs, key=lambda w: w.name == conf.default_wallet, reverse=True
+    )
+
     return (conf, wallet_confs)
 
 
 if __name__ == "__main__":
     cli.parse_for_run()
-    setup_logging()
+    log_path = setup_logging()
     cli.run()
+
+    if log_path:
+        print(
+            f"WARNING: remove logfiles at {log_path} to prevent leaking sensitive data",
+            file=sys.stderr,
+        )
