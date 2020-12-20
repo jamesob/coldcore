@@ -9,6 +9,7 @@ import sys
 import traceback
 import socket
 import threading
+import platform
 import base64
 import datetime
 import shutil
@@ -40,6 +41,23 @@ def use_color():
     if _use_color_no_tty:
         return True
     return False
+
+
+def open_file_browser():
+    plat = platform.system()
+
+    if plat == "Linux":
+        cmd = "xdg-open ."
+    elif plat == "Darwin":
+        cmd = "open ."
+    # TODO windows support
+
+    subprocess.Popen(
+        cmd,
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def esc(*codes: t.Union[int, str]) -> str:
@@ -339,8 +357,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     if not pubfilepath.exists():
         prompt = "would you like me to open a file explorer for you here? [Y/n] "
         if inp(prompt).lower() in ["y", ""]:
-            # TODO devnull output and make function for this
-            subprocess.Popen("xdg-open .", shell=True)
+            open_file_browser()
 
     pubfile = None
     while not pubfile:
@@ -516,8 +533,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     prompt = "would you like me to open a file explorer for you here? [Y/n] "
     if inp(prompt).lower() in ["y", ""]:
-        # TODO macos compat
-        subprocess.Popen("xdg-open .", shell=True)
+        open_file_browser()
 
     # TODO: coldcard specific?
     signed_filename = prepared_tx.replace(".psbt", "-signed.psbt")
@@ -964,7 +980,6 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
     curses.init_pair(5, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_YELLOW, curses.COLOR_BLACK)
 
-    # TODO move set_configs into constructor
     home = HomeScene(scr, config, wallet_configs, controller)
     dashboard = DashboardScene(scr, config, wallet_configs, controller)
 
@@ -995,7 +1010,7 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
                     len(statusbarstr),
                     (" " * (width - len(statusbarstr) - 1))[:width],
                 )
-                # TODO
+                # TODO better status bar
             except Exception:
                 pass
 
