@@ -83,9 +83,11 @@ def conn_line(msg: str) -> str:
     return green(bold(" ○  ")) + msg
 
 
-###############################################################################
 # 8 bit Color
 ###############################################################################
+#
+# TODO this color stuff was taken from some Github page; track it down and credit
+# the authos.
 
 
 def make_color(start, end: str) -> t.Callable[[str], str]:
@@ -349,8 +351,16 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     try:
         wallet = controller.parse_cc_public(pubfile.read_text(), rpc)
-    except Exception:
+    except Exception as e:
         p()
+        if "key 'tpub" in str(e):
+            warn("it looks like you're using a testnet config with a mainnet rpc.")
+            warn("rerun this with `coldcore --rpc <testnet-rpc-url> setup`")
+            sys.exit(1)
+        if "key 'xpub" in str(e):
+            warn("it looks like you're using a mainnet config with a testnet rpc.")
+            warn("rerun this with `coldcore --rpc <mainnet-rpc-url> setup`")
+            sys.exit(1)
         warn("error parsing public.txt contents")
         warn("check your public.txt file and try this again, or file a bug:")
         warn("  github.com/jamesob/coldcore/issues")
@@ -362,6 +372,8 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     done("parsed xpub as ")
     blank(f"  {yellow(wallet.descriptor_base)}")
     p()
+    # Ensure we save the RPC connection we initialized with.
+    wallet.bitcoind_json_url = rpc.url
     config.add_new_wallet(wallet)
 
     if use_gpg or config.loaded_from.startswith("pass:"):
@@ -583,14 +595,14 @@ class HomeScene(Scene):
 
         self.setup_item = MenuItem(0, "start setup", GoSetup)
         self.dashboard_item = MenuItem(1, "dashboard", GoDashboard)
-        self.send_item = MenuItem(2, "send", GoHome)
-        self.recieve_item = MenuItem(3, "receive", GoHome)
+        # self.send_item = MenuItem(2, "send", GoHome)
+        # self.recieve_item = MenuItem(3, "receive", GoHome)
 
         self.mitems = [
             self.setup_item,
             self.dashboard_item,
-            self.send_item,
-            self.recieve_item,
+            # self.send_item,
+            # self.recieve_item,
         ]
 
         self.midx = 0
@@ -666,8 +678,9 @@ class HomeScene(Scene):
 
         if self.wallet_configs:
             menu_option(*self.dashboard_item.args(self.mchoice))
-            menu_option(*self.send_item.args(self.mchoice))
-            menu_option(*self.recieve_item.args(self.mchoice))
+            # TODO
+            # menu_option(*self.send_item.args(self.mchoice))
+            # menu_option(*self.recieve_item.args(self.mchoice))
 
         scr.move(0, 0)
 
@@ -1010,10 +1023,6 @@ def attrs(scr, *attrs):
     yield
     for a in attrs:
         scr.attroff(a)
-
-
-def _pad_str(s: str, num: int) -> str:
-    return (" " * num) + s + (" " * num)
 
 
 def start_ui(config, wallet_configs, controller, action=None):

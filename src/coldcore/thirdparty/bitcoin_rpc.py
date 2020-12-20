@@ -99,6 +99,12 @@ class BaseProxy(object):
             url = urlparse.urlparse(service_url)
             authpair = "%s:%s" % (url.username or "", url.password or "")
 
+            # Do our best to autodetect testnet.
+            if url.port:
+                self.net_name = net_name = (
+                    "testnet3" if url.port == 18332 else "mainnet"
+                )
+
             # Try and pull in auth information from the filesystem if it's missing.
             if authpair == ":":
                 conf = self._get_bitcoind_conf_from_filesystem(btc_conf_file)

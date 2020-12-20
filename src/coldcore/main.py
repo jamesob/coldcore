@@ -561,7 +561,13 @@ class GlobalConfig:
     gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
 
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
-        return get_rpc(cli.args.rpc or self.bitcoind_json_url, wallet, **kwargs)
+        wall_rpc = wallet.bitcoind_json_url if wallet else None
+        return get_rpc(
+            # The ordering of RPC preference is important here.
+            cli.args.rpc or wall_rpc or self.bitcoind_json_url,
+            wallet,
+            **kwargs,
+        )
 
     def exit(self, code):
         # To be overridden in unittests.
