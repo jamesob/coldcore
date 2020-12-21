@@ -1160,7 +1160,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
             "writing wallet to encrypted config; GPG may prompt you "
             "for your password [press enter] "
         )
-    input()
+        input()
 
     config.write()
     done(f"wrote config to {config.loaded_from}")
