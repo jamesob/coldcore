@@ -1,8 +1,12 @@
+"""
+Basic encoding/cryptographic operations, mostly relating to xpub parsing.
+"""
 import hashlib
 import io
 
+# Much of this file was derived from code in buidl-python
+# (https://github.com/buidl-bitcoin/buidl-python).
 
-# TODO: credit buidl-python
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 

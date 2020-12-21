@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-TODO
+         _   _
+ ___ ___| |_| |___ ___ ___ ___
+|  _| . | | . |  _| . |  _| -_|
+|___|___|_|___|___|___|_| |___|
+
+  a trust minimized Bitcoin wallet interface
+
+
+# TODO
 
 - [ ] add wallet name
 - [ ] add version birthday to new config
