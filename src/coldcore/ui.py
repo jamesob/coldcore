@@ -167,6 +167,15 @@ class Action:
     pass
 
 
+class Spinner:
+    def __init__(self):
+        self.i = -1
+
+    def spin(self) -> str:
+        self.i += 1
+        return ["◰", "◳", "◲", "◱"][self.i % 4]
+
+
 class OutputFormatter:
     def __init__(self):
         self.spinner = Spinner()
@@ -221,13 +230,7 @@ class OutputFormatter:
         return (config, wallet)
 
 
-class Spinner:
-    def __init__(self):
-        self.i = -1
-
-    def spin(self) -> str:
-        self.i += 1
-        return ["◰", "◳", "◲", "◱"][self.i % 4]
+F = OutputFormatter()
 
 
 class Scene:
@@ -776,7 +779,13 @@ class DashboardScene(Scene):
         addrwidth = max(int(self.width * 0.4) - 2, 26)
         chainwidth = max(self.width - 6, 92)
 
-        self.start_threads()
+        try:
+            self.start_threads()
+        except ConnectionRefusedError:
+            curses.endwin()
+            F.warn("Unable to connect to Bitcoin Core RPC")
+            F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
+            sys.exit(1)
 
         self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
         self.balance_win.border()

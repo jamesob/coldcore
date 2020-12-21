@@ -117,6 +117,175 @@ def setup_logging() -> Op[Path]:
     return None
 
 
+# --- CLI commands ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+
+@cli.cmd
+def decodepsbt(fname: str, format: str = "json"):
+    """
+    Args:
+        format: either json or hex
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpc = config.rpc()
+    b = Path(fname).read_bytes()
+    hexval = base64.b64encode(b).decode()
+    if format == "hex":
+        print(hexval)
+    else:
+        print(json.dumps(rpc.decodepsbt(hexval), cls=DecimalEncoder))
+
+
+@cli.cmd
+def setup():
+    """
+    Run initial setup for a wallet. This creates the local configuration file (if
+    one doesn't already exist) and populates a watch-only wallet in Core.
+    """
+    config, walls = _get_config(require_wallets=False)
+    if config:
+        config.disable_echo = True
+    start_ui(config, walls, WizardController(), GoSetup)
+
+
+@cli.cmd
+def watch():
+    """Watch activity related to your wallets."""
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+
+    utxos = get_utxos(rpcw)
+    F.task(f"Watching wallet {config.wallet_name}")
+
+    while True:
+        new_utxos = get_utxos(rpcw)
+
+        spent_addrs = utxos.keys() - new_utxos.keys()
+        new_addrs = new_utxos.keys() - utxos.keys()
+
+        for addr in spent_addrs:
+            u = utxos[addr]
+            F.info(f"Saw spend: {u.address} ({u.amount})")
+
+        for addr in new_addrs:
+            u = new_utxos[addr]
+            F.info(f"Got new UTXO: {u.address} ({u.amount})")
+
+        was_zeroconf = [new_utxos[k] for k, v in utxos.items() if v.num_confs == 0]
+        finally_confed = [utxo for utxo in was_zeroconf if utxo.num_confs > 0]
+
+        for u in finally_confed:
+            F.info(f"UTXO confirmed! {u.address} ({u.amount})")
+
+        utxos = new_utxos
+        time.sleep(0.1)
+
+
+@cli.cmd
+def balance(format: str = "plain"):
+    """
+    Check your wallet balances.
+
+    Args:
+        format: can be plain, json, csv, or raw (for listunspent output)
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    result = rpcw.listunspent(0)
+
+    if format == "raw":
+        print(json.dumps(result, cls=DecimalEncoder, indent=2))
+        return
+
+    utxos = UTXO.from_listunspent(result)  # includes unconfirmed
+    sorted_utxos = sorted(utxos, key=lambda u: -u.num_confs)
+
+    if format == "json":
+        print(
+            json.dumps([u.__dict__ for u in sorted_utxos], cls=DecimalEncoder, indent=2)
+        )
+        return
+
+    for utxo in sorted_utxos:
+        if format == "plain":
+            print(f"{utxo.address:<40} {utxo.num_confs:>10} {utxo.amount}")
+        elif format == "csv":
+            print(f"{utxo.address},{utxo.num_confs},{utxo.amount}")
+
+    if format == "plain":
+        amt = sum(u.amount for u in utxos)
+        print(bold(f"total: {len(utxos)} ({amt} BTC)"))
+
+
+@cli.cmd
+def prepare_send(to_address: str, amount: str, spend_from: str = ""):
+    """
+    Prepare a sending PSBT.
+
+    Args:
+        to_address: which address to send to
+        amount: amount to send in BTC
+        spend_from: comma-separated addresses to pull unspents from as inputs
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    spend_from_list = spend_from.split(",") if spend_from else None
+
+    return _prepare_send(config, rpcw, to_address, amount, spend_from_list)
+
+
+@cli.cmd
+def broadcast(signed_psbt_path: Path):
+    """Broadcast a signed PSBT."""
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    hex_val = _psbt_to_tx_hex(rpcw, signed_psbt_path)
+    psbt_hex = base64.b64encode(Path(signed_psbt_path).read_bytes()).decode()
+
+    assert hex_val
+
+    if not confirm_broadcast(rpcw, hex_val, psbt_hex):
+        F.warn("Aborting transaction! Doublespend the inputs!")
+        return
+
+    got_hex = rpcw.sendrawtransaction(hex_val)
+    F.done(f"tx sent: {got_hex}")
+    print(got_hex)
+
+
+@cli.cmd
+def newaddr(num: int = 1):
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+
+    for _ in range(num):
+        print(rpcw.getnewaddress())
+
+
+@cli.cmd
+def ui():
+    config, walls = _get_config(require_wallets=False)
+    if config:
+        config.disable_echo = True
+    start_ui(config, walls, WizardController())
+
+
+@cli.main
+def cli_main():
+    """
+    A trust-minimized wallet script.
+
+    You can think of this program as a small shim between your
+    air-gapped hardware wallet and Bitcoin Core.
+    """
+    ui()
+
+
+# --- Configuration classes ---------------------------------------------------
+# -----------------------------------------------------------------------------
+
+
 @dataclass
 class Wallet:
     """
@@ -455,84 +624,6 @@ class WizardController:
         return confirm_broadcast(*args, **kwargs)
 
 
-def discover_rpc(
-    config: Op["GlobalConfig"] = None, url: Op[str] = None
-) -> Op[BitcoinRPC]:
-    """Return an RPC connection to Bitcoin if possible."""
-    service_url = None
-
-    if cli.args.rpc:
-        service_url = cli.args.rpc
-    elif config:
-        service_url = config.bitcoind_json_url
-    elif url:
-        service_url = url
-
-    for i in (MAINNET, TESTNET):
-        try:
-            logger.info(f"trying RPC for {i} at {service_url}")
-            rpc = get_rpc(service_url, net_name=i)
-            rpc.help()
-            logger.info(f"found RPC connection at {rpc.url}")
-        except Exception:
-            logger.debug("couldn't connect to Core RPC", exc_info=True)
-        else:
-            return rpc
-    return None
-
-
-def get_rpc(
-    url: Op[str] = None,
-    wallet: Op[Wallet] = None,
-    quiet: bool = False,
-    **kwargs,
-) -> BitcoinRPC:
-    """
-    Get a connection to some Bitcoin JSON RPC server. Handles connection caching.
-
-    If connecting to a wallet, ensure the wallet is loaded.
-    """
-    if not hasattr(get_rpc, "_rpc_cache"):
-        setattr(get_rpc, "_rpc_cache", {})
-    cache = get_rpc._rpc_cache  # type: ignore
-
-    wallet_name = wallet.name if wallet else ""
-    cache_key = (wallet_name, url)
-
-    if cache_key in cache:
-        return cache[cache_key]
-
-    if not wallet:
-        got = _get_rpc_inner(url, **kwargs)
-        cache[cache_key] = got
-    else:
-        plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
-        try:
-            # We have to ensure the wallet is loaded before accessing its
-            # RPC.
-            plain_rpc.loadwallet(wallet.name)
-        except JSONRPCError as e:
-            # Wallet already loaded.
-            if e.error.get("code") != -4:  # type: ignore
-                raise
-        cache[cache_key] = _get_rpc_inner(
-            url, net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
-        )
-
-    return cache[cache_key]
-
-
-def _get_rpc_inner(
-    url: Op[str] = None, timeout: int = (60 * 5), **kwargs
-) -> BitcoinRPC:
-    return BitcoinRPC(
-        url,
-        timeout=timeout,
-        debug_stream=(sys.stderr if cli.args.debug else None),
-        **kwargs,
-    )
-
-
 @dataclass
 class GlobalConfig:
     """Coldcore-specific configuration."""
@@ -659,6 +750,92 @@ def _get_blank_conf(bitcoind_json_url: Op[str] = "") -> str:
         default_wallet =
         """
     )
+
+
+# --- Bitcoin RPC utilities ---------------------------------------------------
+# -----------------------------------------------------------------------------
+
+
+def discover_rpc(
+    config: Op[GlobalConfig] = None, url: Op[str] = None
+) -> Op[BitcoinRPC]:
+    """Return an RPC connection to Bitcoin if possible."""
+    service_url = None
+
+    if cli.args.rpc:
+        service_url = cli.args.rpc
+    elif config:
+        service_url = config.bitcoind_json_url
+    elif url:
+        service_url = url
+
+    for i in (MAINNET, TESTNET):
+        try:
+            logger.info(f"trying RPC for {i} at {service_url}")
+            rpc = get_rpc(service_url, net_name=i)
+            rpc.help()
+            logger.info(f"found RPC connection at {rpc.url}")
+        except Exception:
+            logger.debug("couldn't connect to Core RPC", exc_info=True)
+        else:
+            return rpc
+    return None
+
+
+def get_rpc(
+    url: Op[str] = None,
+    wallet: Op[Wallet] = None,
+    quiet: bool = False,
+    **kwargs,
+) -> BitcoinRPC:
+    """
+    Get a connection to some Bitcoin JSON RPC server. Handles connection caching.
+
+    If connecting to a wallet, ensure the wallet is loaded.
+    """
+    if not hasattr(get_rpc, "_rpc_cache"):
+        setattr(get_rpc, "_rpc_cache", {})
+    cache = get_rpc._rpc_cache  # type: ignore
+
+    wallet_name = wallet.name if wallet else ""
+    cache_key = (wallet_name, url)
+
+    if cache_key in cache:
+        return cache[cache_key]
+
+    if not wallet:
+        got = _get_rpc_inner(url, **kwargs)
+        cache[cache_key] = got
+    else:
+        plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
+        try:
+            # We have to ensure the wallet is loaded before accessing its
+            # RPC.
+            plain_rpc.loadwallet(wallet.name)
+        except JSONRPCError as e:
+            # Wallet already loaded.
+            if e.error.get("code") != -4:  # type: ignore
+                raise
+        cache[cache_key] = _get_rpc_inner(
+            url, net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
+        )
+
+    return cache[cache_key]
+
+
+def _get_rpc_inner(
+    url: Op[str] = None, timeout: int = (60 * 5), **kwargs
+) -> BitcoinRPC:
+    return BitcoinRPC(
+        url,
+        timeout=timeout,
+        debug_stream=(sys.stderr if cli.args.debug else None),
+        **kwargs,
+    )
+
+
+# --- Wallet/transaction utilities --------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
@@ -829,180 +1006,8 @@ def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
     return CCWallet.from_io(content, rpc)
 
 
-@cli.cmd
-def decodepsbt(fname: str, format: str = "json"):
-    """
-    Args:
-        format: either json or hex
-    """
-    (config, (wall, *_)) = _get_config_required()
-    rpc = config.rpc()
-    b = Path(fname).read_bytes()
-    hexval = base64.b64encode(b).decode()
-    if format == "hex":
-        print(hexval)
-    else:
-        print(json.dumps(rpc.decodepsbt(hexval), cls=DecimalEncoder))
-
-
-@cli.cmd
-def setup():
-    """
-    Run initial setup for a wallet. This creates the local configuration file (if
-    one doesn't already exist) and populates a watch-only wallet in Core.
-    """
-    config, walls = _get_config(require_wallets=False)
-    if config:
-        config.disable_echo = True
-    start_ui(config, walls, WizardController(), GoSetup)
-
-
-def _run_scantxoutset(rpcw: BitcoinRPC, args, result):
-    try:
-        result["result"] = rpcw.scantxoutset(*args)
-    except socket.timeout:
-        logger.exception("socket timed out during txoutsetscan (this is expected)")
-
-
-def _run_rescan(rpcw: BitcoinRPC, begin_height: int):
-    try:
-        rpcw.rescanblockchain(begin_height)
-    except socket.timeout:
-        logger.exception("socket timed out during rescan (this is expected)")
-
-
-@cli.cmd
-def watch():
-    """Watch activity related to your wallets."""
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-
-    utxos = get_utxos(rpcw)
-    F.task(f"Watching wallet {config.wallet_name}")
-
-    while True:
-        new_utxos = get_utxos(rpcw)
-
-        spent_addrs = utxos.keys() - new_utxos.keys()
-        new_addrs = new_utxos.keys() - utxos.keys()
-
-        for addr in spent_addrs:
-            u = utxos[addr]
-            F.info(f"Saw spend: {u.address} ({u.amount})")
-
-        for addr in new_addrs:
-            u = new_utxos[addr]
-            F.info(f"Got new UTXO: {u.address} ({u.amount})")
-
-        was_zeroconf = [new_utxos[k] for k, v in utxos.items() if v.num_confs == 0]
-        finally_confed = [utxo for utxo in was_zeroconf if utxo.num_confs > 0]
-
-        for u in finally_confed:
-            F.info(f"UTXO confirmed! {u.address} ({u.amount})")
-
-        utxos = new_utxos
-        time.sleep(0.1)
-
-
-@cli.cmd
-def balance(format: str = "plain"):
-    """
-    Check your wallet balances.
-
-    Args:
-        format: can be plain, json, csv, or raw (for listunspent output)
-    """
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-    result = rpcw.listunspent(0)
-
-    if format == "raw":
-        print(json.dumps(result, cls=DecimalEncoder, indent=2))
-        return
-
-    utxos = UTXO.from_listunspent(result)  # includes unconfirmed
-    sorted_utxos = sorted(utxos, key=lambda u: -u.num_confs)
-
-    if format == "json":
-        print(
-            json.dumps([u.__dict__ for u in sorted_utxos], cls=DecimalEncoder, indent=2)
-        )
-        return
-
-    for utxo in sorted_utxos:
-        if format == "plain":
-            print(f"{utxo.address:<40} {utxo.num_confs:>10} {utxo.amount}")
-        elif format == "csv":
-            print(f"{utxo.address},{utxo.num_confs},{utxo.amount}")
-
-    if format == "plain":
-        amt = sum(u.amount for u in utxos)
-        print(bold(f"total: {len(utxos)} ({amt} BTC)"))
-
-
-@cli.cmd
-def prepare_send(to_address: str, amount: str, spend_from: str = ""):
-    """
-    Prepare a sending PSBT.
-
-    Args:
-        to_address: which address to send to
-        amount: amount to send in BTC
-        spend_from: comma-separated addresses to pull unspents from as inputs
-    """
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-    spend_from_list = spend_from.split(",") if spend_from else None
-
-    return _prepare_send(config, rpcw, to_address, amount, spend_from_list)
-
-
-@cli.cmd
-def broadcast(signed_psbt_path: Path):
-    """Broadcast a signed PSBT."""
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-    hex_val = _psbt_to_tx_hex(rpcw, signed_psbt_path)
-    psbt_hex = base64.b64encode(Path(signed_psbt_path).read_bytes()).decode()
-
-    assert hex_val
-
-    if not confirm_broadcast(rpcw, hex_val, psbt_hex):
-        F.warn("Aborting transaction! Doublespend the inputs!")
-        return
-
-    got_hex = rpcw.sendrawtransaction(hex_val)
-    F.done(f"tx sent: {got_hex}")
-    print(got_hex)
-
-
-@cli.cmd
-def newaddr(num: int = 1):
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-
-    for _ in range(num):
-        print(rpcw.getnewaddress())
-
-
-@cli.main
-@cli.cmd
-def ui():
-    config, walls = _get_config(require_wallets=False)
-    if config:
-        config.disable_echo = True
-    start_ui(config, walls, WizardController())
-
-
-@cli.main
-def cli_main():
-    """
-    A trust-minimized wallet script.
-
-    You can think of this as a thin layer of glue that sits between your
-    air-gapped hardware wallet and Bitcoin Core.
-    """
-    ui()
+# --- Config management and storage utilities ---------------------------------
+# -----------------------------------------------------------------------------
 
 
 class Pass:
