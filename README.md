@@ -28,7 +28,8 @@ Coldcard, and not much else.
   - [Why do you only support Coldcard? Will you add others?](#why-do-you-only-support-coldcard-will-you-add-others)
   - [Why did you use Python and not {Rust,Haskell,C++}?](#why-did-you-use-python-and-not-rusthaskellc)
   - [Why do you encrypt the config file by default with GPG?](#why-do-you-encrypt-the-config-file-by-default-with-gpg)
-                 
+- [TODO/Roadmap](#todo)
+
 ---
 
 
@@ -69,7 +70,7 @@ Coldcard, and not much else.
   - Verify the signature: `gpg coldcore-[version].asc`
   - Ensure it matches: `sha256sum coldcore`
 
-## Design 
+## Design
 
 ### Zero install process
 
@@ -106,15 +107,6 @@ approachable for people who haven't previously interacted with the command line 
 So if you've been wanting to learn about the shell, this is a pretty good opportunity.
 
 
-```
-github.com/AlDanial/cloc v 1.86  T=0.04 s (27.3 files/s, 84781.1 lines/s)
--------------------------------------------------------------------------------
-Language                     files          blank        comment           code
--------------------------------------------------------------------------------
-Python                           1            673            313           2123
--------------------------------------------------------------------------------
-```
-
 ### Air-gapped hardware wallet support
 
 This library will only support air-gapped interaction with hardware wallets that are
@@ -139,10 +131,73 @@ until a stable release.
 
 Coldcore is very minimal in its feature set - it's basically just meant for sending
 and receiving to singlesig keys on airgapped hardware wallets. That said, there are
-plans to add multisig support in time.
+plans to add multisig support.
 
 Other wallets do much more than coldcard, but they are orders of magnitude greater
 in terms of source code and therefore much harder to audit.
+
+Coldcard weighs in at about 2100 lines of fairly readable code. And that's including
+at least a few lines of stupid ASCII art and airy presentation logic.
+
+```
+github.com/AlDanial/cloc v 1.86  T=0.04 s (27.3 files/s, 84781.1 lines/s)
+-------------------------------------------------------------------------------
+Language                     files          blank        comment           code
+-------------------------------------------------------------------------------
+Python                           1            673            313           2123
+-------------------------------------------------------------------------------
+```
+
+[Electrum](https://github.com/spesmilo/electrum/) is about 54,000 lines of Python,
+and requires numerous dependencies and an indexing server.
+
+```
+% cloc electrum --exclude-dir=tests
+     259 text files.
+     258 unique files.
+      27 files ignored.
+
+github.com/AlDanial/cloc v 1.86  T=0.65 s (358.5 files/s, 124875.6 lines/s)
+-------------------------------------------------------------------------------
+Language                     files          blank        comment           code
+-------------------------------------------------------------------------------
+Python                         210           9305           8436          54293
+JSON                             6              0              0           6178
+SVG                             11              2              6           2730
+Java                             1             14              2             73
+Markdown                         2             21              0             49
+Protocol Buffers                 1              2              8             37
+F#                               2              2              0             12
+-------------------------------------------------------------------------------
+SUM:                           233           9346           8452          63372
+-------------------------------------------------------------------------------
+```
+
+[Specter-desktop](https://github.com/cryptoadvance/specter-desktop) requires 5x
+the Python this library does as well as a bunch of JavaScript.
+
+```
+% cloc src/cryptoadvance/specter
+     192 text files.
+     191 unique files.
+      76 files ignored.
+
+github.com/AlDanial/cloc v 1.86  T=0.23 s (525.5 files/s, 229720.5 lines/s)
+-------------------------------------------------------------------------------
+Language                     files          blank        comment           code
+-------------------------------------------------------------------------------
+JavaScript                      10           2296           5683          29037
+Python                          53           1359           1236           9588
+CSS                              2             24             33           1074
+HTML                             7             42             28            878
+SVG                             47              2             27            715
+-------------------------------------------------------------------------------
+SUM:                           119           3723           7007          41292
+-------------------------------------------------------------------------------
+```
+
+These are both good products and I don't mean to disparage them, but personally I
+think they are overkill for the kind of simple wallet operations I need to do.
 
 ## Security assumptions
 
@@ -172,7 +227,7 @@ in terms of source code and therefore much harder to audit.
 #### `coldcore --rpc <url>`
 
 Specify the Bitcoin Core RPC server. Useful if you're running Bitcoin Core on a
-separate host. 
+separate host.
 
 Note that RPC settings will be saved per wallet when running `coldcore setup`.
 
@@ -192,8 +247,8 @@ tool will remind you to do so.
 
 ### Why is there no GUI?
 
-The terminal is debatably the safest primitive presentation mechanism with the least
-cumulative code underlying it. Browers and GUI libraries are very complex. 
+The terminal is the simplest display layer with the least cumulative code underlying
+it. Browers and GUI libraries are very complex.
 
 For basic wallet operations, a terminal interface should be more than sufficient,
 especially when including curses.
@@ -228,3 +283,15 @@ encryption natively.]
 I didn't want to have any serious crypto code in this library, and so I delegate
 encryption to GPG rather than requiring a Python dependency that the end user might
 have to install.
+
+## TODO
+
+In rough order of priority:
+
+- [ ] allow manual coin selection when sending
+- [ ] address labeling
+- [ ] multisig workflow
+- [ ] timelock scripts
+- [ ] add wallet name to config
+- [ ] add version birthday to new config
+- [ ] implement scrolling in the curses balance panel
