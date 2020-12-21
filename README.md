@@ -71,6 +71,18 @@ Coldcard, and not much else.
     - Verify the signature: `gpg coldcore-[version].asc`
     - Ensure it matches: `sha256sum coldcore`
 
+## Experimenting with testnet
+
+If you're going to use this wallet, probably best to familiarize yourself with it
+by doing a few test transactions in testnet.
+
+1. Run Bitcoin Core locally with `-testnet`.
+1. Set your Coldcard to work on testnet: `Settings > Blockchain > Testnet: BTC`
+1. Run through the Coldcore setup flow: `coldcore setup`
+    - Coldcore will autodetect your testnet RPC connection, however you can manually
+      set `coldcard --rpc <url>` if desired.
+
+
 ## Design
 
 ### Zero install process
@@ -119,10 +131,10 @@ supported, but I'm happy to add others that fit the criteria of
 
 ### Auditing
 
-The final script, `coldcore`, is hackily compiled from the contents of `src/coldcore/`
-for convenience during development.
+The final script, `coldcore`, is dumbly compiled from the contents of `src/coldcore/`
+for convenience during development (per `./bin/compile`).
 
-If you want to read through, I recommend started with the `src/coldcard` tree.
+If you want to read through, I recommend starting with the `src/coldcore` tree.
 
 ```
 .
@@ -153,10 +165,10 @@ If you want to read through, I recommend started with the `src/coldcard` tree.
 
 ## Status
 
-While this script is relatively simple, and I'm *pretty* sure there aren't any ways to
-lose funds using it (knock wood), it is young and therefore in alpha. Some bugs are
-only shallow under time, so unless you're a highly technical user who can scrutinize
-the code pretty closely, hold off on using this for a few months.
+While this script is relatively simple, and I'm fairly sure there aren't any
+ways to lose funds using it (knock wood), it is young and in alpha. Some bugs
+are only shallow under time, so unless you're a highly technical user who can
+scrutinize the code pretty closely, hold off on using this for a few months.
 
 I am using this code to manage my mainnet coins, but I don't recommend you do the same
 until a stable release.
@@ -164,13 +176,13 @@ until a stable release.
 ## Comparison to other wallets
 
 Coldcore is very minimal in its feature set - it's basically just meant for sending
-and receiving to singlesig keys on airgapped hardware wallets. That said, there are
+and receiving to singlesig keys on airgapped hardware wallets. There are
 plans to add multisig support.
 
-Other wallets do much more than coldcard, but they are orders of magnitude greater
+Other wallets do much more than coldcore, but they are orders of magnitude greater
 in terms of source code and therefore much harder to audit.
 
-Coldcard weighs in at about 2100 lines of fairly readable code. And that's including
+Coldcore weighs in at about 2100 lines of fairly readable code. And that's including
 at least a few lines of stupid ASCII art and airy presentation logic.
 
 ```
@@ -351,6 +363,7 @@ Ze9i1ZlGxIIes25pRiyXXmwys3u1u8VOMmfiLe9VzStIJOMerIo=
 
 In rough order of priority:
 
+- [ ] guide for CLI newbies
 - [ ] allow manual coin selection when sending
 - [ ] address labeling
 - [ ] multisig workflow
