@@ -63,12 +63,12 @@ Coldcard, and not much else.
 ### Verifying the install (optional but recommended)
 
 1. Receive my keys in GPG:
-  - `gpg --keyserver keyserver.ubuntu.com --recv-keys 0x25F27A38A47AD566`
-  - You can verify this fingerprint on my Twitter: https://twitter.com/jamesob
+    - `gpg --keyserver keyserver.ubuntu.com --recv-keys 0x25F27A38A47AD566`
+    - You can verify this fingerprint on my Twitter: https://twitter.com/jamesob
 1. Get the sigs for the release:
-  - Get the signature: `curl -O http://img.jameso.be/sigs/coldcore-$(./coldcore --version).asc`
-  - Verify the signature: `gpg coldcore-[version].asc`
-  - Ensure it matches: `sha256sum coldcore`
+    - Get the signature: `curl -O http://img.jameso.be/sigs/coldcore-$(./coldcore --version).asc`
+    - Verify the signature: `gpg coldcore-[version].asc`
+    - Ensure it matches: `sha256sum coldcore`
 
 ## Design
 
