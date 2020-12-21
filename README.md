@@ -28,6 +28,7 @@ Coldcard, and not much else.
   - [Why do you only support Coldcard? Will you add others?](#why-do-you-only-support-coldcard-will-you-add-others)
   - [Why did you use Python and not {Rust,Haskell,C++}?](#why-did-you-use-python-and-not-rusthaskellc)
   - [Why do you encrypt the config file by default with GPG?](#why-do-you-encrypt-the-config-file-by-default-with-gpg)
+- [Donate](#donate)
 - [TODO/Roadmap](#todo)
 
 ---
@@ -115,6 +116,39 @@ supported, but I'm happy to add others that fit the criteria of
 
 - being opensource, and
 - supporting air-gapped interaction.
+
+### Auditing
+
+The final script, `coldcore`, is hackily compiled from the contents of `src/coldcore/`
+for convenience during development.
+
+If you want to read through, I recommend started with the `src/coldcard` tree.
+
+```
+.
+├── bin
+│   ├── compile                    # generates final `coldcore` script
+│   └── sign_release 
+├── coldcore
+├── sigs                           # signatures for verification
+│   └── coldcore-0.1.0-alpha.asc
+└── src
+    ├── coldcore
+    │   ├── crypto.py              # a few basic cryptographic utilities
+    │   ├── __init__.py
+    │   ├── main.py                # most logic is here; wallet ops, CLI, models
+    │   ├── test_coldcard.py 
+    │   ├── test_crypto.py
+    │   ├── thirdparty
+    │   │   ├── bitcoin_rpc.py     # taken from python-bitcoinlib
+    │   │   ├── clii.py            # taken from jamesob/clii
+    │   │   ├── __init__.py
+    │   │   └── py.typed
+    │   └── ui.py                  # presentation logic, curses
+    ├── requirements-dev.txt
+    └── setup.py                   # for development use only
+```
+
 
 
 ## Status
@@ -284,6 +318,35 @@ I didn't want to have any serious crypto code in this library, and so I delegate
 encryption to GPG rather than requiring a Python dependency that the end user might
 have to install.
 
+## Donate
+
+If you'd like to donate to this project, send Bitcoin to the address signed below
+(`bc1qgyq7lxmk359c3vyxzz674pr8a9gnguxkgdw55p`), or 
+[sponsor me on Github](https://github.com/sponsors/jamesob).
+
+```
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+bc1qgyq7lxmk359c3vyxzz674pr8a9gnguxkgdw55p
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEGNRVI1NPYuZCSIrGepNdrbLETwUFAl/gLmsACgkQepNdrbLE
+TwX8vg/+OZkL1+RbBjV8KNkqp7rQY/O1XXEOYX8JSYM+GEwmeACSGSbV6d7OqmTx
+oofjmu5CJ93a2QpE8qPMIr2knRbUrfouAVzPqiF3RNp+UdEqdoLJkAox9MhXm9aG
+d/PGYYx3Vf0Lq0bo6eUc19XU0bc38RRV0cjAwpKvfyc0u6SW/t6K6zjrXhZhcuga
+LT6DqUxDXD5xDLpjeICDQgazraOr7QG8r39Yw5WSC95ewysiFOp/JQ5Zik6ut9LS
+rXEX6+SqwQZOm0xcynqrYjFuiCdHGU39Eiy0DBXOTjeWQyBAq9pTRMXLId2dqyy1
+iAbot2YmtNHuRH519YAakh4C0r2oFN7B2qQ2twIvt/rWtkmv3FWvcdKw6H0Q+4oc
+VaD9S8cMVoR+bJEtY3EjLkUyd0zmxLuIgKSpdzchru07O/DhvvLvsNwgmzJMoD9f
+iH3RfqMEJY+iAQFfoCA/sPwz56xWMW33Ta57+xfNSCTOtOLIJ5c0eqoCHoQ0PlAb
+kJIEZ/S7qbbF1DGSlMG/Zbw8OHP0dBuKYjIev0CpFplQAV4SIzzOpxmVMQpahZjH
+1RdH9J75+N2l4QgAWR0cJSxW0E56r3J94lM6fgieWySDsxteoAMXqWgLMEpMXNfA
+Ze9i1ZlGxIIes25pRiyXXmwys3u1u8VOMmfiLe9VzStIJOMerIo=
+=Q7Sw
+-----END PGP SIGNATURE-----
+```
+
 ## TODO
 
 In rough order of priority:
@@ -295,3 +358,8 @@ In rough order of priority:
 - [ ] add wallet name to config
 - [ ] add version birthday to new config
 - [ ] implement scrolling in the curses balance panel
+
+## Code from other projects
+
+- [python-bitcoinlib](https://github.com/petertodd/python-bitcoinlib)
+- [buidl-python](https://github.com/buidl-bitcoin/buidl-python)
