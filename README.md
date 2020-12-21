@@ -9,7 +9,7 @@ A trust-minimized Bitcoin wallet interface that relies only on Bitcoin Core.
 - Zero install process for most platforms
 - Designed for simplicity and auditability
 - No GUI, terminal only
-- Modern: works in terms of script descriptors and PSBTs
+- Works in terms of script descriptors and PSBTs
 - Minimal dependencies: Bitcoin Core, Python 3 interpreter, nothing else
 - Supports only airgapped, opensource hardware wallets
 - Integrates with GPG and [`pass`](https://www.passwordstore.org/) for secure xpub storage
@@ -17,16 +17,20 @@ A trust-minimized Bitcoin wallet interface that relies only on Bitcoin Core.
 In short, this is the easiest way to do air-gapped wallet management with Bitcoin Core,
 Coldcard, and not much else.
 
+---
+
 - [Design](#design)
-- [Status](#status) (very alpha)
+- [Status](#status)
 - [Security assumptions](#security-assumptions)
 - [Configuration](#configuration)
 - [FAQ](#faq)
   - [Why is there no GUI?](#why-is-there-no-gui)
-  - [Why do you only support Coldcard? Will you add others?](#why-do-you only-support-coldcard-will-you-add-others)
+  - [Why do you only support Coldcard? Will you add others?](#why-do-you-only-support-coldcard-will-you-add-others)
   - [Why did you use Python and not {Rust,Haskell,C++}?](#why-did-you-use-python-and-not-rusthaskellc)
   - [Why do you encrypt the config file by default with GPG?](#why-do-you-encrypt-the-config-file-by-default-with-gpg)
                  
+---
+
 
 ## Requirements
 
@@ -127,6 +131,9 @@ While this script is relatively simple, and I'm *pretty* sure there aren't any w
 lose funds using it (knock wood), it is young and therefore in alpha. Some bugs are
 only shallow under time, so unless you're a highly technical user who can scrutinize
 the code pretty closely, hold off on using this for a few months.
+
+I am using this code to manage my mainnet coins, but I don't recommend you do the same
+until a stable release.
 
 ## Comparison to other wallets
 
