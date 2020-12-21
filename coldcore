@@ -1611,7 +1611,7 @@ class DashboardScene(Scene):
         )
         self.address_win.box()
         _s(self.address_win, 0, 2, " unused addresses ")
-        _s(self.address_win, 2, 2, "press 'n' to get new address", curses.A_ITALIC)
+        _s(self.address_win, 2, 2, "press 'n' to get new address")
 
         with utxos_lock:
             utxo_addrs = {u.address for u in self.utxos.values()}
