@@ -17,20 +17,45 @@ def render_file():
         third_match = re.search(b"^from \.thirdparty\.(?P<name>\\S+) import", line)
         match = re.search(b"^from \.(?P<name>\\S+) import", line)
 
+        sep = f"# {'-' * 78}\n".encode()
+
+        def inlined_from_delimiters(name):
+            begin = f"# --- inlined from src/coldcore/{name} "
+            end = f"# --- end inlined from src/coldcore/{name} "
+            begin = f"{begin}{'-' * (80 - len(begin))}"
+            end = f"{end}{'-' * (80 - len(end))}"
+            return (begin, end)
+
         if third_match:
-            contents = (
-                Path(src / "thirdparty" / "{}.py".format(third_match.group(1).decode()))
-                .read_bytes()
-                .splitlines()
+            name = third_match.group(1).decode() + ".py"
+            contents = Path(src / "thirdparty" / name).read_bytes().splitlines()
+            delim = inlined_from_delimiters("thirdparty/" + name)
+            newlines.extend(
+                [
+                    b"\n",
+                    delim[0].encode(),
+                    sep,
+                    *contents,
+                    b"\n\n" + delim[1].encode(),
+                    sep,
+                    b"\n",
+                ]
             )
-            newlines.extend([b"\n", *contents, b"\n"])
         elif match:
-            contents = (
-                Path(src / "{}.py".format(match.group(1).decode()))
-                .read_bytes()
-                .splitlines()
+            name = match.group(1).decode() + ".py"
+            contents = Path(src / name).read_bytes().splitlines()
+            delim = inlined_from_delimiters(name)
+            newlines.extend(
+                [
+                    b"\n",
+                    delim[0].encode(),
+                    sep,
+                    *contents,
+                    b"\n\n" + delim[1].encode(),
+                    sep,
+                    b"\n",
+                ]
             )
-            newlines.extend([b"\n", *contents, b"\n"]) 
         else:
             newlines.append(line)
 
