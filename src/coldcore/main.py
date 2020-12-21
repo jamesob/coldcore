@@ -37,7 +37,7 @@ from decimal import Decimal
 from .thirdparty.clii import App
 from .thirdparty.bitcoin_rpc import RawProxy, JSONRPCError
 from .crypto import xpub_to_fp
-from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder
+from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder  # noqa
 # fmt: on
 
 __VERSION__ = "0.1.0-alpha"
@@ -421,7 +421,7 @@ class UTXO:
 class WizardController:
     """Used to proxy logic into the terminal UI."""
 
-    def create_config(self, p: str, url: str) -> "GlobalConfig":
+    def create_config(self, p: str, url: str) -> Op["GlobalConfig"]:
         return create_config(p, url)
 
     def parse_cc_public(self, contents: str, rpc: BitcoinRPC) -> CCWallet:
@@ -434,7 +434,7 @@ class WizardController:
         return discover_rpc(*args, **kwargs)
 
     def has_gpg(self) -> bool:
-        return _get_gpg_command()
+        return bool(_get_gpg_command())
 
     def has_pass(self) -> bool:
         return _get_stdout("which pass")[0] == 0
@@ -599,7 +599,7 @@ class GlobalConfig:
             except Exception:
                 msg = f"Unable to read config section '{key}'"
                 logger.exception(msg)
-                c.err(msg)
+                F.warn(msg)
 
         return (c, wallets)
 
@@ -995,7 +995,7 @@ def ui():
 
 
 @cli.main
-def main():
+def cli_main():
     """
     A trust-minimized wallet script.
 
@@ -1299,7 +1299,7 @@ def _get_config(
 
     unrecog_wallets = set(wallet_names or []) - set(w.name for w in wallet_confs)
     if unrecog_wallets:
-        conf.err("Unrecognized wallet names: {', '.join(unrecog_wallets)}")
+        F.warn("Unrecognized wallet names: {', '.join(unrecog_wallets)}")
         conf.exit(1)
 
     if wallet_names:
@@ -1313,8 +1313,8 @@ def _get_config(
     )
 
     if require_wallets and not wallet_confs:
-        conf.err("At least one wallet config is required but none were found.")
-        conf.err("Try running `coldcore setup --help` to set up a wallet")
+        F.warn("At least one wallet config is required but none were found.")
+        F.warn("Try running `coldcore setup --help` to set up a wallet")
         sys.exit(1)
 
     return (conf, wallet_confs)
