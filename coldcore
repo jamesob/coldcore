@@ -36,6 +36,9 @@ from decimal import Decimal
 # We have to keep these imports to one line because of how ./bin/compile works.
 
 
+# --- inlined from src/coldcore/thirdparty/clii.py -----------------------------
+# ------------------------------------------------------------------------------
+
 """
 clii
 
@@ -307,7 +310,15 @@ class App:
         return fnc(*func_args, **func_kwargs)
 
 
+# --- end inlined from src/coldcore/thirdparty/clii.py -------------------------
+# ------------------------------------------------------------------------------
 
+
+
+
+
+# --- inlined from src/coldcore/thirdparty/bitcoin_rpc.py ----------------------
+# ------------------------------------------------------------------------------
 
 # Copyright (C) 2007 Jan-Klaas Kollhof
 # Copyright (C) 2011-2018 The python-bitcoinlib developers
@@ -638,7 +649,15 @@ class RawProxy(BaseProxy):
 BitcoinRPC = RawProxy
 
 
+# --- end inlined from src/coldcore/thirdparty/bitcoin_rpc.py ------------------
+# ------------------------------------------------------------------------------
 
+
+
+
+
+# --- inlined from src/coldcore/crypto.py --------------------------------------
+# ------------------------------------------------------------------------------
 
 import hashlib
 import io
@@ -716,7 +735,15 @@ def hash256(s):
     return hashlib.sha256(hashlib.sha256(s).digest()).digest()
 
 
+# --- end inlined from src/coldcore/crypto.py ----------------------------------
+# ------------------------------------------------------------------------------
 
+
+
+
+
+# --- inlined from src/coldcore/ui.py ------------------------------------------
+# ------------------------------------------------------------------------------
 
 import curses
 import contextlib
@@ -887,6 +914,15 @@ class Action:
     pass
 
 
+class Spinner:
+    def __init__(self):
+        self.i = -1
+
+    def spin(self) -> str:
+        self.i += 1
+        return ["◰", "◳", "◲", "◱"][self.i % 4]
+
+
 class OutputFormatter:
     def __init__(self):
         self.spinner = Spinner()
@@ -941,13 +977,7 @@ class OutputFormatter:
         return (config, wallet)
 
 
-class Spinner:
-    def __init__(self):
-        self.i = -1
-
-    def spin(self) -> str:
-        self.i += 1
-        return ["◰", "◳", "◲", "◱"][self.i % 4]
+F = OutputFormatter()
 
 
 class Scene:
@@ -1496,7 +1526,13 @@ class DashboardScene(Scene):
         addrwidth = max(int(self.width * 0.4) - 2, 26)
         chainwidth = max(self.width - 6, 92)
 
-        self.start_threads()
+        try:
+            self.start_threads()
+        except ConnectionRefusedError:
+            curses.endwin()
+            F.warn("Unable to connect to Bitcoin Core RPC")
+            F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
+            sys.exit(1)
 
         self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
         self.balance_win.border()
@@ -1775,6 +1811,11 @@ def start_ui(config, wallet_configs, controller, action=None):
         sys.exit(1)
 
 
+# --- end inlined from src/coldcore/ui.py --------------------------------------
+# ------------------------------------------------------------------------------
+
+
+
 # fmt: on
 
 __VERSION__ = "0.1.0-alpha"
@@ -1852,6 +1893,175 @@ def setup_logging() -> Op[Path]:
         return Path(log_path)
 
     return None
+
+
+# --- CLI commands ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+
+@cli.cmd
+def decodepsbt(fname: str, format: str = "json"):
+    """
+    Args:
+        format: either json or hex
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpc = config.rpc()
+    b = Path(fname).read_bytes()
+    hexval = base64.b64encode(b).decode()
+    if format == "hex":
+        print(hexval)
+    else:
+        print(json.dumps(rpc.decodepsbt(hexval), cls=DecimalEncoder))
+
+
+@cli.cmd
+def setup():
+    """
+    Run initial setup for a wallet. This creates the local configuration file (if
+    one doesn't already exist) and populates a watch-only wallet in Core.
+    """
+    config, walls = _get_config(require_wallets=False)
+    if config:
+        config.disable_echo = True
+    start_ui(config, walls, WizardController(), GoSetup)
+
+
+@cli.cmd
+def watch():
+    """Watch activity related to your wallets."""
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+
+    utxos = get_utxos(rpcw)
+    F.task(f"Watching wallet {config.wallet_name}")
+
+    while True:
+        new_utxos = get_utxos(rpcw)
+
+        spent_addrs = utxos.keys() - new_utxos.keys()
+        new_addrs = new_utxos.keys() - utxos.keys()
+
+        for addr in spent_addrs:
+            u = utxos[addr]
+            F.info(f"Saw spend: {u.address} ({u.amount})")
+
+        for addr in new_addrs:
+            u = new_utxos[addr]
+            F.info(f"Got new UTXO: {u.address} ({u.amount})")
+
+        was_zeroconf = [new_utxos[k] for k, v in utxos.items() if v.num_confs == 0]
+        finally_confed = [utxo for utxo in was_zeroconf if utxo.num_confs > 0]
+
+        for u in finally_confed:
+            F.info(f"UTXO confirmed! {u.address} ({u.amount})")
+
+        utxos = new_utxos
+        time.sleep(0.1)
+
+
+@cli.cmd
+def balance(format: str = "plain"):
+    """
+    Check your wallet balances.
+
+    Args:
+        format: can be plain, json, csv, or raw (for listunspent output)
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    result = rpcw.listunspent(0)
+
+    if format == "raw":
+        print(json.dumps(result, cls=DecimalEncoder, indent=2))
+        return
+
+    utxos = UTXO.from_listunspent(result)  # includes unconfirmed
+    sorted_utxos = sorted(utxos, key=lambda u: -u.num_confs)
+
+    if format == "json":
+        print(
+            json.dumps([u.__dict__ for u in sorted_utxos], cls=DecimalEncoder, indent=2)
+        )
+        return
+
+    for utxo in sorted_utxos:
+        if format == "plain":
+            print(f"{utxo.address:<40} {utxo.num_confs:>10} {utxo.amount}")
+        elif format == "csv":
+            print(f"{utxo.address},{utxo.num_confs},{utxo.amount}")
+
+    if format == "plain":
+        amt = sum(u.amount for u in utxos)
+        print(bold(f"total: {len(utxos)} ({amt} BTC)"))
+
+
+@cli.cmd
+def prepare_send(to_address: str, amount: str, spend_from: str = ""):
+    """
+    Prepare a sending PSBT.
+
+    Args:
+        to_address: which address to send to
+        amount: amount to send in BTC
+        spend_from: comma-separated addresses to pull unspents from as inputs
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    spend_from_list = spend_from.split(",") if spend_from else None
+
+    return _prepare_send(config, rpcw, to_address, amount, spend_from_list)
+
+
+@cli.cmd
+def broadcast(signed_psbt_path: Path):
+    """Broadcast a signed PSBT."""
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    hex_val = _psbt_to_tx_hex(rpcw, signed_psbt_path)
+    psbt_hex = base64.b64encode(Path(signed_psbt_path).read_bytes()).decode()
+
+    assert hex_val
+
+    if not confirm_broadcast(rpcw, hex_val, psbt_hex):
+        F.warn("Aborting transaction! Doublespend the inputs!")
+        return
+
+    got_hex = rpcw.sendrawtransaction(hex_val)
+    F.done(f"tx sent: {got_hex}")
+    print(got_hex)
+
+
+@cli.cmd
+def newaddr(num: int = 1):
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+
+    for _ in range(num):
+        print(rpcw.getnewaddress())
+
+
+@cli.cmd
+def ui():
+    config, walls = _get_config(require_wallets=False)
+    if config:
+        config.disable_echo = True
+    start_ui(config, walls, WizardController())
+
+
+@cli.main
+def cli_main():
+    """
+    A trust-minimized wallet script.
+
+    You can think of this program as a small shim between your
+    air-gapped hardware wallet and Bitcoin Core.
+    """
+    ui()
+
+
+# --- Configuration classes ---------------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -2158,7 +2368,7 @@ class UTXO:
 class WizardController:
     """Used to proxy logic into the terminal UI."""
 
-    def create_config(self, p: str, url: str) -> "GlobalConfig":
+    def create_config(self, p: str, url: str) -> Op["GlobalConfig"]:
         return create_config(p, url)
 
     def parse_cc_public(self, contents: str, rpc: BitcoinRPC) -> CCWallet:
@@ -2171,7 +2381,7 @@ class WizardController:
         return discover_rpc(*args, **kwargs)
 
     def has_gpg(self) -> bool:
-        return _get_gpg_command()
+        return bool(_get_gpg_command())
 
     def has_pass(self) -> bool:
         return _get_stdout("which pass")[0] == 0
@@ -2192,8 +2402,140 @@ class WizardController:
         return confirm_broadcast(*args, **kwargs)
 
 
+@dataclass
+class GlobalConfig:
+    """Coldcore-specific configuration."""
+
+    loaded_from: str
+    raw_config: ConfigParser
+    bitcoind_json_url: Op[str] = None
+    default_wallet: Op[str] = None
+    stdout: t.IO = sys.stdout
+    stderr: t.IO = sys.stderr
+    wizard_controller: WizardController = WizardController()
+
+    disable_echo: bool = False
+
+    # If true, skip anything that would block on user input.
+    no_interaction: bool = False
+
+    # Which GPG key should we encrypt with?
+    # See: gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
+    gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
+
+    def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
+        wall_rpc = wallet.bitcoind_json_url if wallet else None
+        return get_rpc(
+            # The ordering of RPC preference is important here.
+            cli.args.rpc or wall_rpc or self.bitcoind_json_url,
+            wallet,
+            **kwargs,
+        )
+
+    def exit(self, code):
+        # To be overridden in unittests.
+        sys.exit(code)
+
+    @classmethod
+    def from_ini(
+        cls, loaded_from: str, conf: ConfigParser
+    ) -> t.Tuple["GlobalConfig", t.List[Wallet]]:
+        sect = conf["default"]
+        c = cls(
+            loaded_from,
+            conf,
+            sect.get("bitcoind_json_url"),
+            sect.get("default_wallet"),
+        )
+        wallets = []
+
+        for key in conf.sections():
+            if key == "default":
+                continue
+
+            net_name = "mainnet"
+            WalletClass = {"coldcard": CCWallet}.get(key.split("-")[0])
+
+            if not WalletClass:
+                raise ValueError(f"unrecognized wallet type for {key}")
+
+            if conf[key].get("xpub", "").startswith("tpub"):
+                net_name = TESTNET
+            rpc = c.rpc(net_name=net_name)
+
+            try:
+                wallets.append(WalletClass.from_ini(key, rpc, conf))
+            except Exception:
+                msg = f"Unable to read config section '{key}'"
+                logger.exception(msg)
+                F.warn(msg)
+
+        return (c, wallets)
+
+    @classmethod
+    def write_blank(cls, outfile: t.IO, bitcoind_json_url: Op[str] = ""):
+        """Write a blank configuration file."""
+        outfile.write(_get_blank_conf(bitcoind_json_url))
+        p = Path(outfile.name)
+
+        # Ensure that the created file is only readable by the owner.
+        if p.exists():
+            # FIXME make cross-platform
+            _sh(f"chmod 600 {p}")
+
+    def add_new_wallet(self, w: Wallet):
+        logger.info("Adding new wallet to config: %s", w.as_ini_dict)
+        self.raw_config[w.name] = w.as_ini_dict
+
+    def write(self):
+        """Save the contents of this config to an INI file on disk."""
+        if _is_pass_path(self.loaded_from):
+            to_path = self.loaded_from.split(PASS_PREFIX)[-1]
+            passobj = Pass()
+            content = io.StringIO()
+            self.raw_config.write(content)
+            content.seek(0)
+            passobj.write(to_path, content.read())
+
+        elif self.loaded_from.endswith(".gpg"):
+            gpg = GPG()
+            content = io.StringIO()
+            self.raw_config.write(content)
+            content.seek(0)
+            gpg.write(self.loaded_from, content.read())
+
+        else:
+            with open(self.loaded_from, "w") as f:
+                self.raw_config.write(f)
+
+        logger.info(f"Wrote configuration to {self.loaded_from}")
+
+
+def _get_blank_conf(bitcoind_json_url: Op[str] = "") -> str:
+    return textwrap.dedent(
+        f"""
+        [default]
+
+        # If blank, this will default to something like
+        #   http://localhost:8332
+        # You can specify non-localhosts like
+        #   http://your_rpc_user:rpcpassword@some_host:8332/
+        bitcoind_json_url = {bitcoind_json_url or ''}
+
+        # This corresponds to one of the wallet sections listed below,
+        # and will be used for commands where a single wallet is required
+        # but unspecified.
+        default_wallet =
+        """
+    )
+
+
+# --- Bitcoin RPC utilities ---------------------------------------------------
+# -----------------------------------------------------------------------------
+
+
 def discover_rpc(
-    config: Op["GlobalConfig"] = None, url: Op[str] = None
+    config: Op[GlobalConfig] = None, url: Op[str] = None
 ) -> Op[BitcoinRPC]:
     """Return an RPC connection to Bitcoin if possible."""
     service_url = None
@@ -2270,132 +2612,8 @@ def _get_rpc_inner(
     )
 
 
-@dataclass
-class GlobalConfig:
-    """Coldcore-specific configuration."""
-
-    loaded_from: str
-    raw_config: ConfigParser
-    bitcoind_json_url: Op[str] = None
-    default_wallet: Op[str] = None
-    stdout: t.IO = sys.stdout
-    stderr: t.IO = sys.stderr
-    wizard_controller: WizardController = WizardController()
-
-    disable_echo: bool = False
-
-    # If true, skip anything that would block on user input.
-    no_interaction: bool = False
-
-    # Which GPG key should we encrypt with?
-    # See: gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
-    gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
-
-    def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
-        wall_rpc = wallet.bitcoind_json_url if wallet else None
-        return get_rpc(
-            # The ordering of RPC preference is important here.
-            cli.args.rpc or wall_rpc or self.bitcoind_json_url,
-            wallet,
-            **kwargs,
-        )
-
-    def exit(self, code):
-        # To be overridden in unittests.
-        sys.exit(code)
-
-    @classmethod
-    def from_ini(
-        cls, loaded_from: str, conf: ConfigParser
-    ) -> t.Tuple["GlobalConfig", t.List[Wallet]]:
-        sect = conf["default"]
-        c = cls(
-            loaded_from,
-            conf,
-            sect.get("bitcoind_json_url"),
-            sect.get("default_wallet"),
-        )
-        wallets = []
-
-        for key in conf.sections():
-            if key == "default":
-                continue
-
-            net_name = "mainnet"
-            WalletClass = {"coldcard": CCWallet}.get(key.split("-")[0])
-
-            if not WalletClass:
-                raise ValueError(f"unrecognized wallet type for {key}")
-
-            if conf[key].get("xpub", "").startswith("tpub"):
-                net_name = TESTNET
-            rpc = c.rpc(net_name=net_name)
-
-            try:
-                wallets.append(WalletClass.from_ini(key, rpc, conf))
-            except Exception:
-                msg = f"Unable to read config section '{key}'"
-                logger.exception(msg)
-                c.err(msg)
-
-        return (c, wallets)
-
-    @classmethod
-    def write_blank(cls, outfile: t.IO, bitcoind_json_url: Op[str] = ""):
-        """Write a blank configuration file."""
-        outfile.write(_get_blank_conf(bitcoind_json_url))
-        p = Path(outfile.name)
-
-        # Ensure that the created file is only readable by the owner.
-        if p.exists():
-            # FIXME make cross-platform
-            _sh(f"chmod 600 {p}")
-
-    def add_new_wallet(self, w: Wallet):
-        logger.info("Adding new wallet to config: %s", w.as_ini_dict)
-        self.raw_config[w.name] = w.as_ini_dict
-
-    def write(self):
-        """Save the contents of this config to an INI file on disk."""
-        if _is_pass_path(self.loaded_from):
-            to_path = self.loaded_from.split(PASS_PREFIX)[-1]
-            passobj = Pass()
-            content = io.StringIO()
-            self.raw_config.write(content)
-            content.seek(0)
-            passobj.write(to_path, content.read())
-
-        elif self.loaded_from.endswith(".gpg"):
-            gpg = GPG()
-            content = io.StringIO()
-            self.raw_config.write(content)
-            content.seek(0)
-            gpg.write(self.loaded_from, content.read())
-
-        else:
-            with open(self.loaded_from, "w") as f:
-                self.raw_config.write(f)
-
-        logger.info(f"Wrote configuration to {self.loaded_from}")
-
-
-def _get_blank_conf(bitcoind_json_url: Op[str] = "") -> str:
-    return textwrap.dedent(
-        f"""
-        [default]
-
-        # If blank, this will default to something like
-        #   http://localhost:8332
-        # You can specify non-localhosts like
-        #   http://your_rpc_user:rpcpassword@some_host:8332/
-        bitcoind_json_url = {bitcoind_json_url or ''}
-
-        # This corresponds to one of the wallet sections listed below,
-        # and will be used for commands where a single wallet is required
-        # but unspecified.
-        default_wallet =
-        """
-    )
+# --- Wallet/transaction utilities --------------------------------------------
+# -----------------------------------------------------------------------------
 
 
 def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
@@ -2566,180 +2784,8 @@ def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
     return CCWallet.from_io(content, rpc)
 
 
-@cli.cmd
-def decodepsbt(fname: str, format: str = "json"):
-    """
-    Args:
-        format: either json or hex
-    """
-    (config, (wall, *_)) = _get_config_required()
-    rpc = config.rpc()
-    b = Path(fname).read_bytes()
-    hexval = base64.b64encode(b).decode()
-    if format == "hex":
-        print(hexval)
-    else:
-        print(json.dumps(rpc.decodepsbt(hexval), cls=DecimalEncoder))
-
-
-@cli.cmd
-def setup():
-    """
-    Run initial setup for a wallet. This creates the local configuration file (if
-    one doesn't already exist) and populates a watch-only wallet in Core.
-    """
-    config, walls = _get_config(require_wallets=False)
-    if config:
-        config.disable_echo = True
-    start_ui(config, walls, WizardController(), GoSetup)
-
-
-def _run_scantxoutset(rpcw: BitcoinRPC, args, result):
-    try:
-        result["result"] = rpcw.scantxoutset(*args)
-    except socket.timeout:
-        logger.exception("socket timed out during txoutsetscan (this is expected)")
-
-
-def _run_rescan(rpcw: BitcoinRPC, begin_height: int):
-    try:
-        rpcw.rescanblockchain(begin_height)
-    except socket.timeout:
-        logger.exception("socket timed out during rescan (this is expected)")
-
-
-@cli.cmd
-def watch():
-    """Watch activity related to your wallets."""
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-
-    utxos = get_utxos(rpcw)
-    F.task(f"Watching wallet {config.wallet_name}")
-
-    while True:
-        new_utxos = get_utxos(rpcw)
-
-        spent_addrs = utxos.keys() - new_utxos.keys()
-        new_addrs = new_utxos.keys() - utxos.keys()
-
-        for addr in spent_addrs:
-            u = utxos[addr]
-            F.info(f"Saw spend: {u.address} ({u.amount})")
-
-        for addr in new_addrs:
-            u = new_utxos[addr]
-            F.info(f"Got new UTXO: {u.address} ({u.amount})")
-
-        was_zeroconf = [new_utxos[k] for k, v in utxos.items() if v.num_confs == 0]
-        finally_confed = [utxo for utxo in was_zeroconf if utxo.num_confs > 0]
-
-        for u in finally_confed:
-            F.info(f"UTXO confirmed! {u.address} ({u.amount})")
-
-        utxos = new_utxos
-        time.sleep(0.1)
-
-
-@cli.cmd
-def balance(format: str = "plain"):
-    """
-    Check your wallet balances.
-
-    Args:
-        format: can be plain, json, csv, or raw (for listunspent output)
-    """
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-    result = rpcw.listunspent(0)
-
-    if format == "raw":
-        print(json.dumps(result, cls=DecimalEncoder, indent=2))
-        return
-
-    utxos = UTXO.from_listunspent(result)  # includes unconfirmed
-    sorted_utxos = sorted(utxos, key=lambda u: -u.num_confs)
-
-    if format == "json":
-        print(
-            json.dumps([u.__dict__ for u in sorted_utxos], cls=DecimalEncoder, indent=2)
-        )
-        return
-
-    for utxo in sorted_utxos:
-        if format == "plain":
-            print(f"{utxo.address:<40} {utxo.num_confs:>10} {utxo.amount}")
-        elif format == "csv":
-            print(f"{utxo.address},{utxo.num_confs},{utxo.amount}")
-
-    if format == "plain":
-        amt = sum(u.amount for u in utxos)
-        print(bold(f"total: {len(utxos)} ({amt} BTC)"))
-
-
-@cli.cmd
-def prepare_send(to_address: str, amount: str, spend_from: str = ""):
-    """
-    Prepare a sending PSBT.
-
-    Args:
-        to_address: which address to send to
-        amount: amount to send in BTC
-        spend_from: comma-separated addresses to pull unspents from as inputs
-    """
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-    spend_from_list = spend_from.split(",") if spend_from else None
-
-    return _prepare_send(config, rpcw, to_address, amount, spend_from_list)
-
-
-@cli.cmd
-def broadcast(signed_psbt_path: Path):
-    """Broadcast a signed PSBT."""
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-    hex_val = _psbt_to_tx_hex(rpcw, signed_psbt_path)
-    psbt_hex = base64.b64encode(Path(signed_psbt_path).read_bytes()).decode()
-
-    assert hex_val
-
-    if not confirm_broadcast(rpcw, hex_val, psbt_hex):
-        F.warn("Aborting transaction! Doublespend the inputs!")
-        return
-
-    got_hex = rpcw.sendrawtransaction(hex_val)
-    F.done(f"tx sent: {got_hex}")
-    print(got_hex)
-
-
-@cli.cmd
-def newaddr(num: int = 1):
-    (config, (wall, *_)) = _get_config_required()
-    rpcw = config.rpc(wall)
-
-    for _ in range(num):
-        print(rpcw.getnewaddress())
-
-
-@cli.main
-@cli.cmd
-def ui():
-    config, walls = _get_config(require_wallets=False)
-    if config:
-        config.disable_echo = True
-    start_ui(config, walls, WizardController())
-
-
-@cli.main
-def main():
-    """
-    A trust-minimized wallet script.
-
-    You can think of this as a thin layer of glue that sits between your
-    air-gapped hardware wallet and Bitcoin Core.
-    """
-    ui()
+# --- Config management and storage utilities ---------------------------------
+# -----------------------------------------------------------------------------
 
 
 class Pass:
@@ -3036,7 +3082,7 @@ def _get_config(
 
     unrecog_wallets = set(wallet_names or []) - set(w.name for w in wallet_confs)
     if unrecog_wallets:
-        conf.err("Unrecognized wallet names: {', '.join(unrecog_wallets)}")
+        F.warn("Unrecognized wallet names: {', '.join(unrecog_wallets)}")
         conf.exit(1)
 
     if wallet_names:
@@ -3050,8 +3096,8 @@ def _get_config(
     )
 
     if require_wallets and not wallet_confs:
-        conf.err("At least one wallet config is required but none were found.")
-        conf.err("Try running `coldcore setup --help` to set up a wallet")
+        F.warn("At least one wallet config is required but none were found.")
+        F.warn("Try running `coldcore setup --help` to set up a wallet")
         sys.exit(1)
 
     return (conf, wallet_confs)
