@@ -437,21 +437,22 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     bal_count = yellow(bold(f"{len(unspents)} UTXOs"))
     blank(f"found an existing balance of {yellow(bal_str)} across {yellow(bal_count)}")
 
-    rescan_begin_height = min([i["height"] for i in unspents])
-    p()
-    blank(
-        f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
-        f"(minutes to hours)"
-    )
-    blank("  this allows us to find transactions associated with your coins")
-    rescan_thread = threading.Thread(
-        target=_run_rescan,
-        args=(config.rpc(wallet), rescan_begin_height),
-        daemon=True,
-    )
-    rescan_thread.start()
+    if unspents:
+        rescan_begin_height = min([i["height"] for i in unspents])
+        p()
+        blank(
+            f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
+            f"(minutes to hours)"
+        )
+        blank("  this allows us to find transactions associated with your coins")
+        rescan_thread = threading.Thread(
+            target=_run_rescan,
+            args=(config.rpc(wallet), rescan_begin_height),
+            daemon=True,
+        )
+        rescan_thread.start()
 
-    time.sleep(2)
+        time.sleep(2)
 
     scan_info = rpcw.getwalletinfo()["scanning"]
     while scan_info:
