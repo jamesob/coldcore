@@ -21,6 +21,7 @@ Coldcard, and not much else.
 
 - [Design](#design)
 - [Status](#status)
+- [Usage](#Usage)
 - [Security assumptions](#security-assumptions)
 - [Configuration](#configuration)
 - [FAQ](#faq)
@@ -172,6 +173,51 @@ scrutinize the code pretty closely, hold off on using this for a few months.
 
 I am using this code to manage my mainnet coins, but I don't recommend you do the same
 until a stable release.
+
+## Usage
+
+### Receiving
+
+You can use `newaddr` to generate addresses to receive to:
+
+```sh
+ % ./coldcore newaddr --help
+usage: coldcore newaddr [-h] [--num NUM]
+
+optional arguments:
+  -h, --help  show this help message and exit
+  --num NUM   default: 1
+```
+
+or just generate addresses and copy/paste from the dashboard view.
+
+### Sending
+
+To send, use a combination of `prepare-send` and `broadcast`:
+
+```sh
+% SEND_TO_ADDR=tb1qj2sjxuhxqyfgxkf6kqnthskqtum8hr2zr0l95j
+
+% ./coldcore prepare-send SEND_TO_ADDR 0.00001
+ -- 1 inputs, 2 outputs
+ -- fee: 0.00000141 BTC (14.10% of amount)
+ ✔  wrote PSBT to unsigned-20201222-0920.psbt - sign with coldcard
+
+% # I transfer the .psbt file to a microSD, sign with the coldcard, and plug
+% # the microSD back in...
+
+% ./coldcore broadcast /media/james/3264-6339/unsigned-20201222-0920-signed.psbt
+ !  About to send a transaction:
+
+     <- tb1qumfrma8gy08wcfq0ugwknh8cy0cdds5df8lfya  (0.00009859 BTC)
+
+     -> tb1qj2sjxuhxqyfgxkf6kqnthskqtum8hr2zr0l95j  (0.00001000 BTC)  (your address)
+     -> tb1qfs2yd54mmdzvrsnzdqk852crzclkn8cfx8cgzf  (0.00008718 BTC)  (your address)
+
+ ?  look okay? [y/N]: y
+ ✔  tx sent: d859cfe7a05e70e5d1e734244fb731c988bb29b236bd108529145cf987b8467f
+d859cfe7a05e70e5d1e734244fb731c988bb29b236bd108529145cf987b8467f
+```
 
 ## Comparison to other wallets
 
