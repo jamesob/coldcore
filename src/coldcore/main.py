@@ -806,7 +806,10 @@ def get_rpc(
     cache = get_rpc._rpc_cache  # type: ignore
 
     wallet_name = wallet.name if wallet else ""
-    cache_key = (wallet_name, url)
+
+    # XXX str(kwargs) is sort of a hack, but it encompasses net_name. Maybe think of a
+    # better way to do this.
+    cache_key = (wallet_name, url, str(kwargs))
 
     if cache_key in cache:
         return cache[cache_key]
