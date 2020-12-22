@@ -938,11 +938,13 @@ def _psbt_to_tx_hex(rpcw: BitcoinRPC, psbt_path: Path) -> str:
     if content[0:5] == b"psbt\xff":
         to_ascii = base64.b64encode(content).decode()
         # TODO handle errors
+        # a KeyError here means maybe we were trying to broadcast an unsigned psbt
         return rpcw.finalizepsbt(to_ascii)["hex"]
 
     # Handle signed TX as base64.
     elif content[0:6] == b"cHNidP":
         # TODO handle errors
+        # a KeyError here means maybe we were trying to broadcast an unsigned psbt
         return rpcw.finalizepsbt(content.decode())["hex"]
 
     # Handle signed TX as hex.
