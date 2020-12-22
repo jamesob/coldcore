@@ -1,5 +1,6 @@
 #!/usr/bin/bash
 
+./bin/compile
 VERSION=$(./coldcore --version | cut -d' ' -f2)
 ASCNAME="sigs/coldcore-${VERSION}.asc"
 MSG=$(cat <(sha256sum coldcore) <(echo $VERSION))

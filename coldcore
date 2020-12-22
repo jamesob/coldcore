@@ -1831,7 +1831,7 @@ def start_ui(config, wallet_configs, controller, action=None):
 
 # fmt: on
 
-__VERSION__ = "0.1.0-alpha"
+__VERSION__ = "0.1.1-alpha"
 
 root_logger = logging.getLogger()
 logger = logging.getLogger("main")
