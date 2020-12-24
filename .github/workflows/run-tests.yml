@@ -6,13 +6,13 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
 
-  strategy:
-    fail-fast: false
-    matrix:
-      python-version: [3.7, 3.8, 3.9]
-      os: [ubuntu-18.04, macOS-latest]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.7, 3.8, 3.9]
+        os: [ubuntu-18.04, macOS-latest]
 
-  steps:
+    steps:
     - uses: actions/checkout@v2
 
     - name: Set up Python ${{ matrix.python-version }}
@@ -25,6 +25,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r src/requirements-dev.txt
 
+    - name: black
+      run: black --check
+
     - name: flake8
       run: |
         flake8 src --count --show-source --statistics --exclude 'test_*'
@@ -33,7 +36,7 @@ jobs:
 
     - name: pytest
       run: |
-        pytest src
+        pytest -vv src
 
     - name: mypy
       run: |
@@ -41,6 +44,6 @@ jobs:
 
     - name: check compiled script
       run: |
-        python ./bin/compile
-        git diff --exit-code
-        ./coldcore --help
+          python ./bin/compile
+          git diff --exit-code
+          ./coldcore --help
