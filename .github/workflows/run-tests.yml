@@ -25,6 +25,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r src/requirements-dev.txt
 
+    - name: black
+      run: black --check
+
     - name: flake8
       run: |
         flake8 src --count --show-source --statistics --exclude 'test_*'
