@@ -1,5 +1,6 @@
 ![coldcore](docs/img/logo.png)
 
+![build status](https://github.com/jamesob/coldcore/workflows/build/badge.svg)
 
 **This is experimental software. Wait for a formal release before use with real
 funds.**
