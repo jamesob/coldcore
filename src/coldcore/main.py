@@ -29,7 +29,6 @@ import base64
 import datetime
 import subprocess
 import time
-import socket
 import textwrap
 import json
 import io

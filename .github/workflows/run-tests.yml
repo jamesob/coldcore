@@ -1,0 +1,46 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on ${{ matrix.os }}
+
+  strategy:
+    fail-fast: false
+    matrix:
+      python-version: [3.7, 3.8, 3.9]
+      os: [ubuntu-18.04, macOS-latest]
+
+  steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r src/requirements-dev.txt
+
+    - name: flake8
+      run: |
+        flake8 src --count --show-source --statistics --exclude 'test_*'
+        # When linting the tests, ignore long line errors
+        flake8 src --count --show-source --statistics --ignore E501
+
+    - name: pytest
+      run: |
+        pytest src
+
+    - name: mypy
+      run: |
+        mypy src/coldcore
+
+    - name: check compiled script
+      run: |
+        python ./bin/compile
+        git diff --exit-code
+        ./coldcore --help
