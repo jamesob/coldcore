@@ -340,7 +340,7 @@ tool will remind you to do so.
 ### Why is there no GUI?
 
 The terminal is the simplest display layer with the least cumulative code underlying
-it. Browers and GUI libraries are very complex.
+it. Browsers and GUI libraries are very complex.
 
 For basic wallet operations, a terminal interface should be more than sufficient,
 especially when including curses.
