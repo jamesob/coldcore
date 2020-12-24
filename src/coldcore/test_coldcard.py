@@ -12,6 +12,8 @@ def test_parse_public():
 
     expected = {
         "bitcoind_json_url": None,
+        "bitcoind_name": "coldcard-3d88d0cf",
+        "loaded_from": None,
         "fingerprint": "3d88d0cf",
         "deriv_path": "/84h/0h",
         "xpub": "xpub6BUBVXTHPtiWZuJT7ZVArTEXi5FcGNX4d4TMLTuRSCcVEQ37BASyq17BoSBxwLgaVBvyR9GbtnVeKhAAwdmqHppzrukRk55XHgc32idASq2",
@@ -57,6 +59,8 @@ def test_parse_public():
 
     assert wall_testnet.__dict__ == {
         "fingerprint": "f0ccde95",
+        "bitcoind_name": "coldcard-f0ccde95",
+        "loaded_from": None,
         "deriv_path": "/84h/1h/0h",
         "xpub": "tpubDCmmTK7n4vhofN8wuc5ioZcm9egBgwTRN7BRbpg8AHdLqA3TkyjkuvFbrymQBDHBNEvop6KFqHH1SCP1Qe9u55U2fzpvg9jLqhEPEHuTAt4",
         "descriptors": [
