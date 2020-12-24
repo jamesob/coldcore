@@ -6,13 +6,13 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
 
-  strategy:
-    fail-fast: false
-    matrix:
-      python-version: [3.7, 3.8, 3.9]
-      os: [ubuntu-18.04, macOS-latest]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.7, 3.8, 3.9]
+        os: [ubuntu-18.04, macOS-latest]
 
-  steps:
+    steps:
     - uses: actions/checkout@v2
 
     - name: Set up Python ${{ matrix.python-version }}
@@ -41,6 +41,6 @@ jobs:
 
     - name: check compiled script
       run: |
-        python ./bin/compile
-        git diff --exit-code
-        ./coldcore --help
+          python ./bin/compile
+          git diff --exit-code
+          ./coldcore --help
