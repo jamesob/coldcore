@@ -716,7 +716,10 @@ class HomeScene(Scene):
 def _s(window, y, x, msg, attr=0):
     """A width-safe version of addstr."""
     (_, width) = window.getmaxyx()
-    window.addstr(y, x, msg[:width], attr)
+    if not attr:
+        window.addstr(y, x, msg[:width])
+    else:
+        window.addstr(y, x, msg[:width], attr)
 
 
 class DashboardScene(Scene):
@@ -730,6 +733,15 @@ class DashboardScene(Scene):
 
         self.conn_status = None
         self.loop_count = 0
+
+        self.cursorposy = 0
+        self.cursorposx = 0
+
+        # Y cursor positions within each window.
+        self.wincursoridx = {
+            "utxos": 0,
+            "addrs": 0,
+        }
 
     def start_threads(self):
         if self.threads_started:
@@ -780,6 +792,67 @@ class DashboardScene(Scene):
         balwidth = max(int(self.width * 0.6) - 4, 66)
         addrwidth = max(int(self.width * 0.4) - 2, 26)
         chainwidth = max(self.width - 6, 92)
+        chainwin_height = int(self.height * 0.25)
+
+        self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
+        self.address_win = scr.derwin(
+            top_panel_height, addrwidth, substarty, substartx + balwidth + 1
+        )
+        self.chain_win = scr.derwin(
+            chainwin_height, chainwidth, substarty + top_panel_height, substartx
+        )
+
+        LIMIT_NEW_ADDRS = 10
+
+        if k == ord("n"):
+            if len(self.new_addrs) < LIMIT_NEW_ADDRS:
+                rpcw = self.config.rpc(wall)
+                self.new_addrs.append(rpcw.getnewaddress())
+
+        utxo_addrs = {u.address for u in self.utxos.values()}
+        # Strip out used addresses.
+        self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
+
+        with utxos_lock:
+            utxos = dict(self.utxos)
+
+        max_balance_utxo_lines = self.balance_win.getmaxyx()[0] - 6
+        total_balance_lines = min(len(utxos), max_balance_utxo_lines)
+
+        # The (window name, y pos) of the user's selection cursor.
+        if k in [ord("h"), curses.KEY_LEFT, ord("a")] and self.cursorposx > 0:
+            self.cursorposx -= 1
+        elif k in [ord("l"), curses.KEY_RIGHT, ord("d")] and self.cursorposx < 1:
+            self.cursorposx += 1
+
+        cur_win_title = [
+            "utxos",
+            "addrs",
+        ][self.cursorposx]
+        last_wincursoridx = self.wincursoridx[cur_win_title]
+
+        downkeys = [ord("j"), curses.KEY_DOWN, ord("s")]
+        upkeys = [ord("k"), curses.KEY_UP, ord("w")]
+
+        if cur_win_title == "utxos":
+            if k in downkeys and last_wincursoridx < (total_balance_lines - 1):
+                self.wincursoridx["utxos"] += 1
+            elif k in upkeys and last_wincursoridx > 0:
+                self.wincursoridx["utxos"] -= 1
+
+        elif cur_win_title == "addrs":
+            if k in downkeys and last_wincursoridx < (len(self.new_addrs) - 1):
+                self.wincursoridx["addrs"] += 1
+            elif k in upkeys and last_wincursoridx > 0:
+                self.wincursoridx["addrs"] -= 1
+
+        # Bring cursor to new address if created
+        if k == ord("n"):
+            cur_win_title = "addrs"
+            self.cursorposx = 1  # the index for the addresses window
+            self.wincursoridx[cur_win_title] = len(self.new_addrs) - 1
+
+        wincursoridx = self.wincursoridx[cur_win_title]
 
         try:
             self.start_threads()
@@ -789,9 +862,14 @@ class DashboardScene(Scene):
             F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
             sys.exit(1)
 
-        self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
-        self.balance_win.border()
-        _s(self.balance_win, 0, 2, " UTXOs ")
+        # --- Paint the balances window
+
+        border_attrs = [curses.A_BOLD] if cur_win_title == "utxos" else []
+        title_attrs = [curses.A_UNDERLINE] if cur_win_title == "utxos" else []
+        with attrs(self.balance_win, *border_attrs):
+            self.balance_win.border()
+        with attrs(self.balance_win, *title_attrs):
+            _s(self.balance_win, 0, 2, " UTXOs ")
 
         _s(
             self.balance_win,
@@ -800,75 +878,73 @@ class DashboardScene(Scene):
             f"{'address':<44}{'confs':>10}{'BTC':>12}",
         )
 
-        with utxos_lock:
-            starty = 2
-            startx = 2
-            max_lines = self.balance_win.getmaxyx()[0] - 6
+        starty = 2
+        startx = 2
 
-            _s(self.balance_win, starty, startx, "")
-            starty += 1
+        _s(self.balance_win, starty, startx, "")
+        starty += 1
 
-            if max_lines < len(self.utxos):
-                _s(
-                    self.balance_win,
-                    starty,
-                    startx,
-                    "-- too many UTXOs to fit --",
-                    curses.A_BOLD,
-                )
-                starty += 1
-
-            sorted_utxos = sorted(self.utxos.values(), key=lambda u: -u.num_confs)[
-                -max_lines:
-            ]
-            total_bal = f"{sum([u.amount for u in sorted_utxos])}"
-            i = 0
-
-            for u in sorted_utxos:
-                line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
-                attrslist = []
-
-                if u.num_confs < 6:
-                    attrslist.extend([colr(3), curses.A_BOLD])
-
-                with attrs(self.balance_win, *attrslist):
-                    _s(self.balance_win, starty + i, startx, line)
-
-                i += 1
-
+        if max_balance_utxo_lines < len(utxos):
             _s(
                 self.balance_win,
-                starty + i + 1,
+                starty,
                 startx,
-                f"{' ':<50}{total_bal:>16}",
+                "-- too many UTXOs to fit --",
                 curses.A_BOLD,
             )
+            starty += 1
 
-        if k == ord("n"):
-            if len(self.new_addrs) < 10:
-                rpcw = self.config.rpc(wall)
-                self.new_addrs.append(rpcw.getnewaddress())
+        sorted_utxos = sorted(utxos.values(), key=lambda u: -u.num_confs)[
+            -max_balance_utxo_lines:
+        ]
+        total_bal = f"{sum([u.amount for u in sorted_utxos])}"
+        i = 0
 
-        self.address_win = scr.derwin(
-            top_panel_height, addrwidth, substarty, substartx + balwidth + 1
+        for u in sorted_utxos:
+            line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
+            attrslist = []
+
+            if u.num_confs < 6:
+                attrslist.extend([colr(3), curses.A_BOLD])
+
+            if cur_win_title == "utxos" and wincursoridx == i:
+                attrslist.append(curses.A_REVERSE)
+
+            with attrs(self.balance_win, *attrslist):
+                _s(self.balance_win, starty + i, startx, line)
+
+            i += 1
+
+        _s(
+            self.balance_win,
+            starty + i + 1,
+            startx,
+            f"{' ':<50}{total_bal:>16}",
+            curses.A_BOLD,
         )
-        self.address_win.box()
-        _s(self.address_win, 0, 2, " unused addresses ")
+
+        # --- Paint the addresses window
+
+        border_attrs = [curses.A_BOLD] if cur_win_title == "addrs" else []
+        title_attrs = [curses.A_UNDERLINE] if cur_win_title == "addrs" else []
+        with attrs(self.address_win, *border_attrs):
+            self.address_win.border()
+        with attrs(self.address_win, *title_attrs):
+            _s(self.address_win, 0, 2, " unused addresses ")
+
         _s(self.address_win, 2, 2, "press 'n' to get new address")
 
-        with utxos_lock:
-            utxo_addrs = {u.address for u in self.utxos.values()}
-            # Strip out used addresses.
-            self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
+        for i, addr in enumerate(self.new_addrs):
 
-            for i, addr in enumerate(self.new_addrs):
+            attrslist = []
+            if cur_win_title == "addrs" and wincursoridx == i:
+                attrslist.append(curses.A_REVERSE)
+
+            with attrs(self.address_win, *attrslist):
                 _s(self.address_win, 3 + i, 2, addr)
 
-        chainwin_height = int(self.height * 0.25)
+        # --- Paint the chain history window
 
-        self.chain_win = scr.derwin(
-            chainwin_height, chainwidth, substarty + top_panel_height, substartx
-        )
         self.chain_win.box()
         _s(self.chain_win, 0, 2, " chain status ")
 
