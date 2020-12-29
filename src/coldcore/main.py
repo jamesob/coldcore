@@ -41,10 +41,10 @@ from decimal import Decimal
 
 # fmt: off
 # We have to keep these imports to one line because of how ./bin/compile works.
-from .thirdparty.clii import App
+from .thirdparty.clii import App, Arg
 from .thirdparty.bitcoin_rpc import BitcoinRPC, JSONRPCError
 from .crypto import xpub_to_fp
-from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder  # noqa
+from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder, to_clipboard  # noqa
 # fmt: on
 
 __VERSION__ = "0.1.1-alpha"
@@ -259,13 +259,26 @@ def broadcast(signed_psbt_path: Path):
     print(got_hex)
 
 
+ClipArg = Arg(("-c", "--to-clipboard"))
+
+
 @cli.cmd
-def newaddr(num: int = 1):
+def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
+    """
+    Args:
+        num: the number of new addresses to generate
+        clip: if passed, copy the latest new address to the clipboard
+    """
     (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
+    addr = ""
 
     for _ in range(num):
-        print(rpcw.getnewaddress())
+        addr = rpcw.getnewaddress()
+        print(addr)
+
+    if clip and addr:
+        to_clipboard(addr)
 
 
 @cli.cmd

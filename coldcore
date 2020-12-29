@@ -2140,13 +2140,26 @@ def broadcast(signed_psbt_path: Path):
     print(got_hex)
 
 
+ClipArg = Arg(("-c", "--to-clipboard"))
+
+
 @cli.cmd
-def newaddr(num: int = 1):
+def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
+    """
+    Args:
+        num: the number of new addresses to generate
+        clip: if passed, copy the latest new address to the clipboard
+    """
     (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
+    addr = ""
 
     for _ in range(num):
-        print(rpcw.getnewaddress())
+        addr = rpcw.getnewaddress()
+        print(addr)
+
+    if clip and addr:
+        to_clipboard(addr)
 
 
 @cli.cmd
