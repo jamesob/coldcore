@@ -609,6 +609,10 @@ def _run_rescan(rpcw, begin_height: int):
         logger.exception("socket timed out during rescan (this is expected)")
 
 
+# Curses is weird and ENTER isn't always ENTER.
+ENTER_KEYS = [curses.KEY_ENTER, 10, 13]
+
+
 class HomeScene(Scene):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -637,7 +641,7 @@ class HomeScene(Scene):
 
         if k in [ord("q")]:
             return (-1, Quit)
-        elif k in [curses.KEY_ENTER, 10, 13]:
+        elif k in ENTER_KEYS:
             return (-1, self.mchoice.action)
 
         if k in [curses.KEY_DOWN, ord("j")] and self.midx < (len(self.mitems) - 1):
@@ -736,6 +740,7 @@ class DashboardScene(Scene):
 
         self.cursorposy = 0
         self.cursorposx = 0
+        self.flash_msg = ""
 
         # Y cursor positions within each window.
         self.wincursoridx = {
@@ -804,6 +809,9 @@ class DashboardScene(Scene):
 
         LIMIT_NEW_ADDRS = 10
 
+        if k != -1:
+            self.flash_msg = ""
+
         if k == ord("n"):
             if len(self.new_addrs) < LIMIT_NEW_ADDRS:
                 rpcw = self.config.rpc(wall)
@@ -865,7 +873,7 @@ class DashboardScene(Scene):
         # --- Paint the balances window
 
         border_attrs = [curses.A_BOLD] if cur_win_title == "utxos" else []
-        title_attrs = [curses.A_UNDERLINE] if cur_win_title == "utxos" else []
+        title_attrs = [curses.A_STANDOUT] if cur_win_title == "utxos" else []
         with attrs(self.balance_win, *border_attrs):
             self.balance_win.border()
         with attrs(self.balance_win, *title_attrs):
@@ -926,7 +934,7 @@ class DashboardScene(Scene):
         # --- Paint the addresses window
 
         border_attrs = [curses.A_BOLD] if cur_win_title == "addrs" else []
-        title_attrs = [curses.A_UNDERLINE] if cur_win_title == "addrs" else []
+        title_attrs = [curses.A_STANDOUT] if cur_win_title == "addrs" else []
         with attrs(self.address_win, *border_attrs):
             self.address_win.border()
         with attrs(self.address_win, *title_attrs):
@@ -935,13 +943,18 @@ class DashboardScene(Scene):
         _s(self.address_win, 2, 2, "press 'n' to get new address")
 
         for i, addr in enumerate(self.new_addrs):
-
             attrslist = []
-            if cur_win_title == "addrs" and wincursoridx == i:
+            is_highlighted = cur_win_title == "addrs" and wincursoridx == i
+
+            if is_highlighted:
                 attrslist.append(curses.A_REVERSE)
 
             with attrs(self.address_win, *attrslist):
                 _s(self.address_win, 3 + i, 2, addr)
+
+            if is_highlighted and k in ENTER_KEYS:
+                to_clipboard(addr)
+                self.flash_msg = f"copied address '{addr}' to clipboard"
 
         # --- Paint the chain history window
 
@@ -974,6 +987,12 @@ class DashboardScene(Scene):
                 )
                 _s(self.chain_win, 4 + i, 3, blockstr[:chainwidth])
 
+        if self.flash_msg:
+            with attrs(scr, colr(3)):
+                msg = f" [!] {self.flash_msg}"
+                msg = msg + (" " * (self.width - len(msg) - 1))
+                scr.addstr(0, 0, msg)
+
         scr.refresh()
 
         # scr.move(self.width, self.height)
@@ -986,6 +1005,26 @@ class DashboardScene(Scene):
             self.stop_threads()
 
         return (next_k, GoDashboard)
+
+
+def to_clipboard(s: str) -> bool:
+    """Put s into the system clipboard."""
+    plat = platform.system()
+
+    def sh(cmd, **kwargs) -> int:
+        return subprocess.run(cmd, shell=True, **kwargs).returncode
+
+    if plat == "Linux":
+        if sh("which xclip", capture_output=True) != 0:
+            logger.info("xclip not found, cannot copy to clipboard")
+            return False
+        cmd = "xclip -selection clipboard"
+    elif plat == "Darwin":
+        cmd = "pbcopy"
+    # TODO windows support
+
+    sh(f"echo -n {s} | {cmd}")
+    return True
 
 
 @dataclass
@@ -1053,6 +1092,13 @@ GoDashboard = Action()
 Quit = Action()
 
 
+class _TermOpts:
+    has_256color = False
+
+
+TermOpts = _TermOpts()
+
+
 def draw_menu(scr, config, wallet_configs, controller, action=None):
     # Clear and refresh the screen for a blank canvas
     scr.clear()
@@ -1060,12 +1106,16 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
     scr.scrollok(True)
 
     curses.start_color()
+    curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
     curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)
     curses.init_pair(5, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+
+    if curses.COLORS >= 256:
+        TermOpts.has_256color = True
 
     home = HomeScene(scr, config, wallet_configs, controller)
     dashboard = DashboardScene(scr, config, wallet_configs, controller)
@@ -1078,8 +1128,6 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
         scr.clear()
         height, width = scr.getmaxyx()
 
-        # FIXME
-
         try:
             kstr = curses.keyname(k).decode()
         except ValueError:
@@ -1088,6 +1136,7 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
         statusbarstr = f"press 'q' to exit | never sell | last keypress: {kstr} ({k})"
         if k == -1:
             statusbarstr += " | waiting"
+
         # Render status bar
         with attrs(scr, colr(3)):
             try:
