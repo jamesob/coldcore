@@ -1542,10 +1542,16 @@ class DashboardScene(Scene):
         if k != -1:
             self.flash_msg = ""
 
+        if rpc_conn_lost.is_set():
+            self.flash_msg = "connection to Bitcoin Core lost"
+
         if k == ord("n"):
             if len(self.new_addrs) < LIMIT_NEW_ADDRS:
-                rpcw = self.config.rpc(wall)
-                self.new_addrs.append(rpcw.getnewaddress())
+                try:
+                    rpcw = self.config.rpc(wall)
+                    self.new_addrs.append(rpcw.getnewaddress())
+                except Exception:
+                    logger.info("call to getnewadddress failed", exc_info=True)
 
         utxo_addrs = {u.address for u in self.utxos.values()}
         # Strip out used addresses.
@@ -1698,14 +1704,16 @@ class DashboardScene(Scene):
                 rpc = self.config.rpc()
                 netinfo = self.rpc.getnetworkinfo()
             except Exception:
-                self.conn_status = warning_line("! couldn't connect to Bitcoin Core")
+                self.conn_status = "! couldn't connect to Bitcoin Core"
             else:
                 ver = netinfo["subversion"].strip("/")
                 self.conn_status = (
                     f"✔ connected to version {ver} at {rpc.host}:{rpc.port}"
                 )
 
-        _s(self.chain_win, 2, 3, self.conn_status)
+        status_attrs = [curses.A_BOLD, colr(2)] if self.conn_status[0] == "!" else []
+        with attrs(self.chain_win, *status_attrs):
+            _s(self.chain_win, 2, 3, self.conn_status)
 
         with blocks_lock:
             for i, b in enumerate(self.blocks[-max_history:]):
@@ -1767,6 +1775,7 @@ class Block:
     txs: int
 
 
+rpc_conn_lost = threading.Event()
 stop_threads_event = threading.Event()
 utxos_lock = threading.Lock()
 blocks_lock = threading.Lock()
@@ -1776,7 +1785,11 @@ def _get_new_blocks(rpc, blocks):
     last_saw = None
 
     while True:
-        saw = rpc.getbestblockhash()
+        try:
+            saw = rpc.getbestblockhash()
+        except Exception:
+            logger.info("getbestblockhash call failed", exc_info=True)
+            rpc_conn_lost.set()
 
         if saw != last_saw:
             stats = rpc.getblockstats(saw)
@@ -1793,6 +1806,7 @@ def _get_new_blocks(rpc, blocks):
                 )
             last_saw = saw
 
+        rpc_conn_lost.clear()
         time.sleep(1)
 
         if stop_threads_event.is_set():
@@ -1804,7 +1818,10 @@ def _get_utxo_lines(rpcw, controller, utxos):
     Poll constantly for new UTXOs.
     """
     while True:
-        new_utxos = controller.get_utxos(rpcw)
+        try:
+            new_utxos = controller.get_utxos(rpcw)
+        except Exception:
+            logger.info("listunspents call failed", exc_info=True)
 
         with utxos_lock:
             utxos.clear()
