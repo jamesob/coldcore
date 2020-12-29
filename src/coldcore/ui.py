@@ -609,21 +609,26 @@ def _run_rescan(rpcw, begin_height: int):
         logger.exception("socket timed out during rescan (this is expected)")
 
 
+# Curses is weird and ENTER isn't always ENTER.
+ENTER_KEYS = [curses.KEY_ENTER, 10, 13]
+
+
 class HomeScene(Scene):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.setup_item = MenuItem(0, "start setup", GoSetup)
-        self.dashboard_item = MenuItem(1, "dashboard", GoDashboard)
+        self.dashboard_item = MenuItem(0, "dashboard", GoDashboard)
+        self.setup_item = MenuItem(1, "set up wallet", GoSetup)
         # self.send_item = MenuItem(2, "send", GoHome)
         # self.recieve_item = MenuItem(3, "receive", GoHome)
 
         self.mitems = [
             self.setup_item,
-            self.dashboard_item,
             # self.send_item,
             # self.recieve_item,
         ]
+        if self.wallet_configs:
+            self.mitems.insert(0, self.dashboard_item)
 
         self.midx = 0
         self.mchoice = self.setup_item
@@ -636,7 +641,7 @@ class HomeScene(Scene):
 
         if k in [ord("q")]:
             return (-1, Quit)
-        elif k in [curses.KEY_ENTER, 10, 13]:
+        elif k in ENTER_KEYS:
             return (-1, self.mchoice.action)
 
         if k in [curses.KEY_DOWN, ord("j")] and self.midx < (len(self.mitems) - 1):
@@ -694,13 +699,13 @@ class HomeScene(Scene):
                 start_str = " -> " + start_str[4:]
             scr.addstr(start_y + title_height + 8 + idx, half, start_str[:width])
 
-        menu_option(*self.setup_item.args(self.mchoice))
-
         if self.wallet_configs:
             menu_option(*self.dashboard_item.args(self.mchoice))
             # TODO
             # menu_option(*self.send_item.args(self.mchoice))
             # menu_option(*self.recieve_item.args(self.mchoice))
+
+        menu_option(*self.setup_item.args(self.mchoice))
 
         scr.move(0, 0)
 
@@ -715,7 +720,10 @@ class HomeScene(Scene):
 def _s(window, y, x, msg, attr=0):
     """A width-safe version of addstr."""
     (_, width) = window.getmaxyx()
-    window.addstr(y, x, msg[:width], attr)
+    if not attr:
+        window.addstr(y, x, msg[:width])
+    else:
+        window.addstr(y, x, msg[:width], attr)
 
 
 class DashboardScene(Scene):
@@ -729,6 +737,16 @@ class DashboardScene(Scene):
 
         self.conn_status = None
         self.loop_count = 0
+
+        self.cursorposy = 0
+        self.cursorposx = 0
+        self.flash_msg = ""
+
+        # Y cursor positions within each window.
+        self.wincursoridx = {
+            "utxos": 0,
+            "addrs": 0,
+        }
 
     def start_threads(self):
         if self.threads_started:
@@ -779,6 +797,70 @@ class DashboardScene(Scene):
         balwidth = max(int(self.width * 0.6) - 4, 66)
         addrwidth = max(int(self.width * 0.4) - 2, 26)
         chainwidth = max(self.width - 6, 92)
+        chainwin_height = int(self.height * 0.25)
+
+        self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
+        self.address_win = scr.derwin(
+            top_panel_height, addrwidth, substarty, substartx + balwidth + 1
+        )
+        self.chain_win = scr.derwin(
+            chainwin_height, chainwidth, substarty + top_panel_height, substartx
+        )
+
+        LIMIT_NEW_ADDRS = 10
+
+        if k != -1:
+            self.flash_msg = ""
+
+        if k == ord("n"):
+            if len(self.new_addrs) < LIMIT_NEW_ADDRS:
+                rpcw = self.config.rpc(wall)
+                self.new_addrs.append(rpcw.getnewaddress())
+
+        utxo_addrs = {u.address for u in self.utxos.values()}
+        # Strip out used addresses.
+        self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
+
+        with utxos_lock:
+            utxos = dict(self.utxos)
+
+        max_balance_utxo_lines = self.balance_win.getmaxyx()[0] - 6
+        total_balance_lines = min(len(utxos), max_balance_utxo_lines)
+
+        # The (window name, y pos) of the user's selection cursor.
+        if k in [ord("h"), curses.KEY_LEFT, ord("a")] and self.cursorposx > 0:
+            self.cursorposx -= 1
+        elif k in [ord("l"), curses.KEY_RIGHT, ord("d")] and self.cursorposx < 1:
+            self.cursorposx += 1
+
+        cur_win_title = [
+            "utxos",
+            "addrs",
+        ][self.cursorposx]
+        last_wincursoridx = self.wincursoridx[cur_win_title]
+
+        downkeys = [ord("j"), curses.KEY_DOWN, ord("s")]
+        upkeys = [ord("k"), curses.KEY_UP, ord("w")]
+
+        if cur_win_title == "utxos":
+            if k in downkeys and last_wincursoridx < (total_balance_lines - 1):
+                self.wincursoridx["utxos"] += 1
+            elif k in upkeys and last_wincursoridx > 0:
+                self.wincursoridx["utxos"] -= 1
+
+        elif cur_win_title == "addrs":
+            if k in downkeys and last_wincursoridx < (len(self.new_addrs) - 1):
+                self.wincursoridx["addrs"] += 1
+            elif k in upkeys and last_wincursoridx > 0:
+                self.wincursoridx["addrs"] -= 1
+
+        # Bring cursor to new address if created
+        if k == ord("n"):
+            cur_win_title = "addrs"
+            self.cursorposx = 1  # the index for the addresses window
+            self.wincursoridx[cur_win_title] = len(self.new_addrs) - 1
+
+        wincursoridx = self.wincursoridx[cur_win_title]
 
         try:
             self.start_threads()
@@ -788,9 +870,14 @@ class DashboardScene(Scene):
             F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
             sys.exit(1)
 
-        self.balance_win = scr.derwin(top_panel_height, balwidth, substarty, substartx)
-        self.balance_win.border()
-        _s(self.balance_win, 0, 2, " UTXOs ")
+        # --- Paint the balances window
+
+        border_attrs = [curses.A_BOLD] if cur_win_title == "utxos" else []
+        title_attrs = [curses.A_STANDOUT] if cur_win_title == "utxos" else []
+        with attrs(self.balance_win, *border_attrs):
+            self.balance_win.border()
+        with attrs(self.balance_win, *title_attrs):
+            _s(self.balance_win, 0, 2, " UTXOs ")
 
         _s(
             self.balance_win,
@@ -799,79 +886,82 @@ class DashboardScene(Scene):
             f"{'address':<44}{'confs':>10}{'BTC':>12}",
         )
 
-        with utxos_lock:
-            starty = 2
-            startx = 2
-            max_lines = self.balance_win.getmaxyx()[0] - 6
+        starty = 2
+        startx = 2
 
-            _s(self.balance_win, starty, startx, "")
-            starty += 1
+        _s(self.balance_win, starty, startx, "")
+        starty += 1
 
-            if max_lines < len(self.utxos):
-                _s(
-                    self.balance_win,
-                    starty,
-                    startx,
-                    "-- too many UTXOs to fit --",
-                    curses.A_BOLD,
-                )
-                starty += 1
-
-            sorted_utxos = sorted(self.utxos.values(), key=lambda u: -u.num_confs)[
-                -max_lines:
-            ]
-            total_bal = f"{sum([u.amount for u in sorted_utxos])}"
-            i = 0
-
-            for u in sorted_utxos:
-                line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
-                attrslist = []
-
-                if u.num_confs < 6:
-                    attrslist.extend([colr(3), curses.A_BOLD])
-
-                with attrs(self.balance_win, *attrslist):
-                    _s(self.balance_win, starty + i, startx, line)
-
-                i += 1
-
+        if max_balance_utxo_lines < len(utxos):
             _s(
                 self.balance_win,
-                starty + i + 1,
+                starty,
                 startx,
-                f"{' ':<50}{total_bal:>16}",
+                "-- too many UTXOs to fit --",
                 curses.A_BOLD,
             )
+            starty += 1
 
-        if k == ord("n"):
-            if len(self.new_addrs) < 10:
-                rpcw = self.config.rpc(wall)
-                self.new_addrs.append(rpcw.getnewaddress())
+        sorted_utxos = sorted(utxos.values(), key=lambda u: -u.num_confs)[
+            -max_balance_utxo_lines:
+        ]
+        total_bal = f"{sum([u.amount for u in sorted_utxos])}"
+        i = 0
 
-        self.address_win = scr.derwin(
-            top_panel_height, addrwidth, substarty, substartx + balwidth + 1
+        for u in sorted_utxos:
+            line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
+            attrslist = []
+
+            if u.num_confs < 6:
+                attrslist.extend([colr(3), curses.A_BOLD])
+
+            if cur_win_title == "utxos" and wincursoridx == i:
+                attrslist.append(curses.A_REVERSE)
+
+            with attrs(self.balance_win, *attrslist):
+                _s(self.balance_win, starty + i, startx, line)
+
+            i += 1
+
+        _s(
+            self.balance_win,
+            starty + i + 1,
+            startx,
+            f"{' ':<50}{total_bal:>16}",
+            curses.A_BOLD,
         )
-        self.address_win.box()
-        _s(self.address_win, 0, 2, " unused addresses ")
+
+        # --- Paint the addresses window
+
+        border_attrs = [curses.A_BOLD] if cur_win_title == "addrs" else []
+        title_attrs = [curses.A_STANDOUT] if cur_win_title == "addrs" else []
+        with attrs(self.address_win, *border_attrs):
+            self.address_win.border()
+        with attrs(self.address_win, *title_attrs):
+            _s(self.address_win, 0, 2, " unused addresses ")
+
         _s(self.address_win, 2, 2, "press 'n' to get new address")
 
-        with utxos_lock:
-            utxo_addrs = {u.address for u in self.utxos.values()}
-            # Strip out used addresses.
-            self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
+        for i, addr in enumerate(self.new_addrs):
+            attrslist = []
+            is_highlighted = cur_win_title == "addrs" and wincursoridx == i
 
-            for i, addr in enumerate(self.new_addrs):
+            if is_highlighted:
+                attrslist.append(curses.A_REVERSE)
+
+            with attrs(self.address_win, *attrslist):
                 _s(self.address_win, 3 + i, 2, addr)
 
-        chainwin_height = int(self.height * 0.25)
+            if is_highlighted and k in ENTER_KEYS:
+                to_clipboard(addr)
+                self.flash_msg = f"copied address '{addr}' to clipboard"
 
-        self.chain_win = scr.derwin(
-            chainwin_height, chainwidth, substarty + top_panel_height, substartx
-        )
+        # --- Paint the chain history window
+
         self.chain_win.box()
         _s(self.chain_win, 0, 2, " chain status ")
 
-        max_history = chainwin_height - 4
+        max_history = chainwin_height - 5
 
         if not self.conn_status or self.loop_count % 20 == 0:
             try:
@@ -897,6 +987,12 @@ class DashboardScene(Scene):
                 )
                 _s(self.chain_win, 4 + i, 3, blockstr[:chainwidth])
 
+        if self.flash_msg:
+            with attrs(scr, colr(3)):
+                msg = f" [!] {self.flash_msg}"
+                msg = msg + (" " * (self.width - len(msg) - 1))
+                scr.addstr(0, 0, msg)
+
         scr.refresh()
 
         # scr.move(self.width, self.height)
@@ -909,6 +1005,26 @@ class DashboardScene(Scene):
             self.stop_threads()
 
         return (next_k, GoDashboard)
+
+
+def to_clipboard(s: str) -> bool:
+    """Put s into the system clipboard."""
+    plat = platform.system()
+
+    def sh(cmd, **kwargs) -> int:
+        return subprocess.run(cmd, shell=True, **kwargs).returncode
+
+    if plat == "Linux":
+        if sh("which xclip", capture_output=True) != 0:
+            logger.info("xclip not found, cannot copy to clipboard")
+            return False
+        cmd = "xclip -selection clipboard"
+    elif plat == "Darwin":
+        cmd = "pbcopy"
+    # TODO windows support
+
+    sh(f"echo -n {s} | {cmd}")
+    return True
 
 
 @dataclass
@@ -976,6 +1092,13 @@ GoDashboard = Action()
 Quit = Action()
 
 
+class _TermOpts:
+    has_256color = False
+
+
+TermOpts = _TermOpts()
+
+
 def draw_menu(scr, config, wallet_configs, controller, action=None):
     # Clear and refresh the screen for a blank canvas
     scr.clear()
@@ -983,12 +1106,16 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
     scr.scrollok(True)
 
     curses.start_color()
+    curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
     curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)
     curses.init_pair(5, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(6, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+
+    if curses.COLORS >= 256:
+        TermOpts.has_256color = True
 
     home = HomeScene(scr, config, wallet_configs, controller)
     dashboard = DashboardScene(scr, config, wallet_configs, controller)
@@ -1001,8 +1128,6 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
         scr.clear()
         height, width = scr.getmaxyx()
 
-        # FIXME
-
         try:
             kstr = curses.keyname(k).decode()
         except ValueError:
@@ -1011,6 +1136,7 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
         statusbarstr = f"press 'q' to exit | never sell | last keypress: {kstr} ({k})"
         if k == -1:
             statusbarstr += " | waiting"
+
         # Render status bar
         with attrs(scr, colr(3)):
             try:

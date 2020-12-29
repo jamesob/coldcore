@@ -41,18 +41,16 @@ from decimal import Decimal
 
 # fmt: off
 # We have to keep these imports to one line because of how ./bin/compile works.
-from .thirdparty.clii import App
-from .thirdparty.bitcoin_rpc import RawProxy, JSONRPCError
+from .thirdparty.clii import App, Arg
+from .thirdparty.bitcoin_rpc import BitcoinRPC, JSONRPCError
 from .crypto import xpub_to_fp
-from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder  # noqa
+from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder, to_clipboard  # noqa
 # fmt: on
 
 __VERSION__ = "0.1.1-alpha"
 
 root_logger = logging.getLogger()
 logger = logging.getLogger("main")
-
-BitcoinRPC = RawProxy
 
 MAINNET = "mainnet"
 TESTNET = "testnet3"
@@ -261,13 +259,26 @@ def broadcast(signed_psbt_path: Path):
     print(got_hex)
 
 
+ClipArg = Arg(("-c", "--to-clipboard"))
+
+
 @cli.cmd
-def newaddr(num: int = 1):
+def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
+    """
+    Args:
+        num: the number of new addresses to generate
+        clip: if passed, copy the latest new address to the clipboard
+    """
     (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
+    addr = ""
 
     for _ in range(num):
-        print(rpcw.getnewaddress())
+        addr = rpcw.getnewaddress()
+        print(addr)
+
+    if clip and addr:
+        to_clipboard(addr)
 
 
 @cli.cmd
@@ -1153,6 +1164,7 @@ def _get_gpg_command() -> Op[str]:
 
 
 def get_path_for_new_config(use_gpg=False) -> str:
+    """Returns the suggested path for a new configuration."""
     # FIXME: prefix backends
     gpg = _get_gpg_command()
     if gpg and use_gpg:
@@ -1183,7 +1195,6 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
     Write a new global config file out using some storage backend.
     """
     if not CONFIG_DIR.exists():
-        # FIXME macOS
         CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     confp = ConfigParser()
@@ -1197,7 +1208,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
             return input(prompt).lower() == "y"
         return True
 
-    # Optionally, read the configuration from `pass`.
+    # Optionally, create the configuration in `pass`.
     if _is_pass_path(conf_path):
         passobj = Pass()
         passpath = conf_path.split(PASS_PREFIX, 1)[-1]
@@ -1212,7 +1223,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
 
         confp.read_string(contents)
 
-    # Or read from GPG
+    # Or within GPG
     elif conf_path.endswith(".gpg"):
         gpg = GPG()
         if not confirm_overwrite():
@@ -1227,7 +1238,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
             return None
         confp.read_string(contents)
 
-    # Or just read it from some file path.
+    # Or just write it to some file path.
     else:
         logger.info(f"Creating blank configuration at {conf_path}")
         if not confirm_overwrite():
