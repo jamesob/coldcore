@@ -9,7 +9,7 @@ A trust-minimized Bitcoin wallet interface that relies only on Bitcoin Core.
 
 - Zero install process for most platforms
 - Designed for simplicity and auditability
-- No GUI, terminal only
+- No GUI, terminal only (curses and command-line) 
 - Works in terms of script descriptors and PSBTs
 - Minimal dependencies: Bitcoin Core, Python 3 interpreter, nothing else
 - Supports only airgapped, opensource hardware wallets
