@@ -42,7 +42,7 @@ from decimal import Decimal
 # fmt: off
 # We have to keep these imports to one line because of how ./bin/compile works.
 from .thirdparty.clii import App
-from .thirdparty.bitcoin_rpc import RawProxy, JSONRPCError
+from .thirdparty.bitcoin_rpc import BitcoinRPC, JSONRPCError
 from .crypto import xpub_to_fp
 from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder  # noqa
 # fmt: on
@@ -51,8 +51,6 @@ __VERSION__ = "0.1.1-alpha"
 
 root_logger = logging.getLogger()
 logger = logging.getLogger("main")
-
-BitcoinRPC = RawProxy
 
 MAINNET = "mainnet"
 TESTNET = "testnet3"

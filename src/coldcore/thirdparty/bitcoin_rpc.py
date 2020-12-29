@@ -48,7 +48,7 @@ class JSONRPCError(Exception):
         self.error = rpc_error
 
 
-class BaseProxy(object):
+class BitcoinRPC(object):
     """Base JSON-RPC proxy class. Contains only private methods; do not use
     directly."""
 
@@ -282,30 +282,6 @@ class BaseProxy(object):
                 }
             )
 
-
-class RawProxy(BaseProxy):
-    """Low-level proxy to a bitcoin JSON-RPC service
-    Unlike ``Proxy``, no conversion is done besides parsing JSON. As far as
-    Python is concerned, you can call any method; ``JSONRPCError`` will be
-    raised if the server does not recognize it.
-    """
-
-    def __init__(
-        self,
-        service_url=None,
-        service_port=None,
-        btc_conf_file=None,
-        timeout=DEFAULT_HTTP_TIMEOUT,
-        **kwargs,
-    ):
-        super(RawProxy, self).__init__(
-            service_url=service_url,
-            service_port=service_port,
-            btc_conf_file=btc_conf_file,
-            timeout=timeout,
-            **kwargs,
-        )
-
     def __getattr__(self, name):
         if name.startswith("__") and name.endswith("__"):
             # Prevent RPC calls for non-existing python internal attribute
@@ -322,6 +298,3 @@ class RawProxy(BaseProxy):
         # bitcoin.rpc.<lambda>>
         _call_wrapper.__name__ = name
         return _call_wrapper
-
-
-BitcoinRPC = RawProxy
