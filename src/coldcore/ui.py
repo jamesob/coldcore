@@ -613,17 +613,18 @@ class HomeScene(Scene):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.setup_item = MenuItem(0, "start setup", GoSetup)
-        self.dashboard_item = MenuItem(1, "dashboard", GoDashboard)
+        self.dashboard_item = MenuItem(0, "dashboard", GoDashboard)
+        self.setup_item = MenuItem(1, "set up wallet", GoSetup)
         # self.send_item = MenuItem(2, "send", GoHome)
         # self.recieve_item = MenuItem(3, "receive", GoHome)
 
         self.mitems = [
             self.setup_item,
-            self.dashboard_item,
             # self.send_item,
             # self.recieve_item,
         ]
+        if self.wallet_configs:
+            self.mitems.insert(0, self.dashboard_item)
 
         self.midx = 0
         self.mchoice = self.setup_item
@@ -694,13 +695,13 @@ class HomeScene(Scene):
                 start_str = " -> " + start_str[4:]
             scr.addstr(start_y + title_height + 8 + idx, half, start_str[:width])
 
-        menu_option(*self.setup_item.args(self.mchoice))
-
         if self.wallet_configs:
             menu_option(*self.dashboard_item.args(self.mchoice))
             # TODO
             # menu_option(*self.send_item.args(self.mchoice))
             # menu_option(*self.recieve_item.args(self.mchoice))
+
+        menu_option(*self.setup_item.args(self.mchoice))
 
         scr.move(0, 0)
 
@@ -871,7 +872,7 @@ class DashboardScene(Scene):
         self.chain_win.box()
         _s(self.chain_win, 0, 2, " chain status ")
 
-        max_history = chainwin_height - 4
+        max_history = chainwin_height - 5
 
         if not self.conn_status or self.loop_count % 20 == 0:
             try:

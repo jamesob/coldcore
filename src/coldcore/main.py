@@ -1151,6 +1151,7 @@ def _get_gpg_command() -> Op[str]:
 
 
 def get_path_for_new_config(use_gpg=False) -> str:
+    """Returns the suggested path for a new configuration."""
     # FIXME: prefix backends
     gpg = _get_gpg_command()
     if gpg and use_gpg:
@@ -1181,7 +1182,6 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
     Write a new global config file out using some storage backend.
     """
     if not CONFIG_DIR.exists():
-        # FIXME macOS
         CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     confp = ConfigParser()
@@ -1195,7 +1195,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
             return input(prompt).lower() == "y"
         return True
 
-    # Optionally, read the configuration from `pass`.
+    # Optionally, create the configuration in `pass`.
     if _is_pass_path(conf_path):
         passobj = Pass()
         passpath = conf_path.split(PASS_PREFIX, 1)[-1]
@@ -1210,7 +1210,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
 
         confp.read_string(contents)
 
-    # Or read from GPG
+    # Or within GPG
     elif conf_path.endswith(".gpg"):
         gpg = GPG()
         if not confirm_overwrite():
@@ -1225,7 +1225,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
             return None
         confp.read_string(contents)
 
-    # Or just read it from some file path.
+    # Or just write it to some file path.
     else:
         logger.info(f"Creating blank configuration at {conf_path}")
         if not confirm_overwrite():
