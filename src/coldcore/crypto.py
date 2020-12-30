@@ -9,17 +9,11 @@ import hashlib
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
-MAINNET_XPRV = bytes.fromhex("0488ade4")
 MAINNET_XPUB = bytes.fromhex("0488b21e")
-MAINNET_YPRV = bytes.fromhex("049d7878")
 MAINNET_YPUB = bytes.fromhex("049d7cb2")
-MAINNET_ZPRV = bytes.fromhex("04b2430c")
 MAINNET_ZPUB = bytes.fromhex("04b24746")
-TESTNET_XPRV = bytes.fromhex("04358394")
 TESTNET_XPUB = bytes.fromhex("043587cf")
-TESTNET_YPRV = bytes.fromhex("044a4e28")
 TESTNET_YPUB = bytes.fromhex("044a5262")
-TESTNET_ZPRV = bytes.fromhex("045f18bc")
 TESTNET_ZPUB = bytes.fromhex("045f1cf6")
 
 
@@ -63,10 +57,6 @@ def xpub_to_fp(xpub: str) -> str:
         raise ValueError(f"not an xprv, yprv or zprv: {version}")
 
     return hash160(raw[-33:])[:4].hex()
-
-
-def decode_base58(s):
-    return raw_decode_base58(s)[1:]
 
 
 def hash160(s):
