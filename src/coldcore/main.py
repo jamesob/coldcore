@@ -149,8 +149,6 @@ def setup():
     one doesn't already exist) and populates a watch-only wallet in Core.
     """
     config, walls = _get_config(require_wallets=False)
-    if config:
-        config.disable_echo = True
     start_ui(config, walls, WizardController(), GoSetup)
 
 
@@ -284,8 +282,6 @@ def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
 @cli.cmd
 def ui():
     config, walls = _get_config(require_wallets=False)
-    if config:
-        config.disable_echo = True
     start_ui(config, walls, WizardController())
 
 
@@ -388,12 +384,6 @@ class Wallet:
             "earliest_block": str(self.earliest_block or ""),
             "checksum_map": json.dumps(checksums),
         }
-
-    @property
-    def loaded_xpub(self):
-        if not hasattr(self, "__loaded_xpub"):
-            self.__loaded_xpub = self.__loaded_xpub.strip()
-        return self.__loaded_xpub
 
     @classmethod
     def from_ini(cls, name: str, rpc: BitcoinRPC, conf: ConfigParser) -> "Wallet":
@@ -654,15 +644,6 @@ class GlobalConfig:
     stderr: t.IO = sys.stderr
     wizard_controller: WizardController = WizardController()
 
-    disable_echo: bool = False
-
-    # If true, skip anything that would block on user input.
-    no_interaction: bool = False
-
-    # Which GPG key should we encrypt with?
-    # See: gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html
-    gpg_default_key: Op[str] = os.environ.get("COLDCORE_GPG_KEY")
-
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
         wall_rpc = wallet.bitcoind_json_url if wallet else None
         return get_rpc(
@@ -803,7 +784,6 @@ def discover_rpc(
 def get_rpc(
     url: Op[str] = None,
     wallet: Op[Wallet] = None,
-    quiet: bool = False,
     **kwargs,
 ) -> BitcoinRPC:
     """
@@ -1017,18 +997,6 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     return True
 
 
-def _wallet_from_input(inp: str, rpc: BitcoinRPC) -> Wallet:
-    inppath = Path(inp)
-    if inp == "-":
-        content = io.StringIO(sys.stdin.read())
-    elif inppath.exists():
-        content = io.StringIO(Path(inp).read_text())
-    else:
-        raise ValueError(f"input path {inppath} can't be read")
-
-    return CCWallet.from_io(content, rpc)
-
-
 # --- Config management and storage utilities ---------------------------------
 # -----------------------------------------------------------------------------
 
@@ -1068,10 +1036,6 @@ class GPG:
 
     def __init__(self):
         self.gpg_path: Op[str] = _get_gpg_command()
-
-    @property
-    def system_has_gpg(self):
-        return bool(self.gpg_path)
 
     @classmethod
     def write(self, path: str, content: str) -> bool:
@@ -1148,7 +1112,6 @@ def find_gpg_default_key() -> Op[str]:
 
 
 CONFIG_DIR = Path.home() / ".config" / "coldcore"
-DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.ini"
 
 
 # TODO move config backend to prefix system

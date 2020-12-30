@@ -74,29 +74,6 @@ def t_(b: t.Union[bytes, t.Any]) -> str:
     return b
 
 
-def b_(t: t.Union[str, t.Any]) -> bytes:
-    """ensure binary type"""
-    if isinstance(t, str):
-        return t.encode()
-    return t
-
-
-def check_line(msg: str) -> str:
-    return green(bold(" ✔  ")) + msg
-
-
-def warning_line(msg: str) -> str:
-    return red(bold(" !  ")) + msg
-
-
-def info_line(msg: str) -> str:
-    return bold(" □  ") + msg
-
-
-def bullet_line(msg: str) -> str:
-    return " -- " + msg
-
-
 def conn_line(msg: str) -> str:
     return green(bold(" ○  ")) + msg
 
@@ -119,48 +96,13 @@ def make_color(start, end: str) -> t.Callable[[str], str]:
     return color_func
 
 
-# According to https://en.wikipedia.org/wiki/ANSI_escape_code#graphics ,
-# 39 is reset for foreground, 49 is reset for background, 0 is reset for all
-# we can use 0 for convenience, but it will make color combination behaves weird.
-END = esc(0)
-
 FG_END = esc(39)
-black = make_color(esc(30), FG_END)
 red = make_color(esc(31), FG_END)
 green = make_color(esc(32), FG_END)
 yellow = make_color(esc(33), FG_END)
 blue = make_color(esc(34), FG_END)
-magenta = make_color(esc(35), FG_END)
 cyan = make_color(esc(36), FG_END)
-white = make_color(esc(37), FG_END)
-gray = make_color(esc(90), FG_END)
-
-BG_END = esc(49)
-black_bg = make_color(esc(40), BG_END)
-red_bg = make_color(esc(41), BG_END)
-green_bg = make_color(esc(42), BG_END)
-yellow_bg = make_color(esc(43), BG_END)
-blue_bg = make_color(esc(44), BG_END)
-magenta_bg = make_color(esc(45), BG_END)
-cyan_bg = make_color(esc(46), BG_END)
-white_bg = make_color(esc(47), BG_END)
-
-HL_END = esc(22, 27, 39)
-
-black_hl = make_color(esc(1, 30, 7), HL_END)
-red_hl = make_color(esc(1, 31, 7), HL_END)
-green_hl = make_color(esc(1, 32, 7), HL_END)
-yellow_hl = make_color(esc(1, 33, 7), HL_END)
-blue_hl = make_color(esc(1, 34, 7), HL_END)
-magenta_hl = make_color(esc(1, 35, 7), HL_END)
-cyan_hl = make_color(esc(1, 36, 7), HL_END)
-white_hl = make_color(esc(1, 37, 7), HL_END)
-
 bold = make_color(esc(1), esc(22))
-italic = make_color(esc(3), esc(23))
-underline = make_color(esc(4), esc(24))
-strike = make_color(esc(9), esc(29))
-blink = make_color(esc(5), esc(25))
 
 
 class Action:
@@ -188,19 +130,19 @@ class OutputFormatter:
         print(msg, flush=True, file=sys.stderr, end="", **kwargs)
 
     def task(self, s: str, **kwargs):
-        self.p(info_line(s), **kwargs)
+        self.p(bold(" □  ") + s, **kwargs)
 
     def blank(self, s: str, **kwargs):
         self.p("    " + s, **kwargs)
 
     def done(self, s: str, **kwargs):
-        self.p(check_line(s), **kwargs)
+        self.p(green(bold(" ✔  ")) + s, **kwargs)
 
     def alert(self, s: str, **kwargs):
         self.p(f" {yellow('!')}  " + s, **kwargs)
 
     def info(self, s: str, **kwargs):
-        self.p(bullet_line(s), **kwargs)
+        self.p(" -- " + s, **kwargs)
 
     def inp(self, s: str) -> str:
         got = input(yellow(" ?  ") + s).strip()
@@ -208,7 +150,7 @@ class OutputFormatter:
         return got
 
     def warn(self, s: str, **kwargs):
-        self.p(warning_line(s), **kwargs)
+        self.p(red(bold(" !  ")) + s, **kwargs)
 
     def spin(self, s: str):
         self.p(f" {self.spinner.spin()}  {s} ", clear=True)
@@ -737,8 +679,6 @@ class DashboardScene(Scene):
 
         self.conn_status = None
         self.loop_count = 0
-
-        self.cursorposy = 0
         self.cursorposx = 0
         self.flash_msg = ""
 
