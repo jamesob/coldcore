@@ -16,9 +16,11 @@ import shutil
 import os
 import json
 import decimal
+import string
 from dataclasses import dataclass
 from pathlib import Path
 from collections import namedtuple
+from curses.textpad import Textbox
 
 
 logger = logging.getLogger("ui")
@@ -681,6 +683,7 @@ class DashboardScene(Scene):
         self.loop_count = 0
         self.cursorposx = 0
         self.flash_msg = ""
+        self.selected_addrs = set()
 
         # Y cursor positions within each window.
         self.wincursoridx = {
@@ -829,7 +832,7 @@ class DashboardScene(Scene):
             self.balance_win,
             2,
             2,
-            f"{'address':<44}{'confs':>10}{'BTC':>12}",
+            f"{'address':<48}{'confs':>10}{'BTC':>12}",
         )
 
         starty = 2
@@ -852,30 +855,83 @@ class DashboardScene(Scene):
             -max_balance_utxo_lines:
         ]
         total_bal = f"{sum([u.amount for u in sorted_utxos])}"
-        i = 0
+        coin_idx = 0
+        y_idx = 0
+
+        def sanitize_label(label: str):
+            return "".join(i for i in label if i in string.printable).strip()
+
+        bal_line_width = 70
 
         for u in sorted_utxos:
-            line = f"{u.address:<44}{u.num_confs:>10}{u.amount:>12}"
             attrslist = []
 
             if u.num_confs < 6:
-                attrslist.extend([colr(3), curses.A_BOLD])
+                attrslist.extend([colr(6), curses.A_BOLD])
 
-            if cur_win_title == "utxos" and wincursoridx == i:
+            enter_label = False
+
+            if cur_win_title == "utxos" and wincursoridx == coin_idx:
                 attrslist.append(curses.A_REVERSE)
 
+                if k in (ENTER_KEYS + [ord(" ")]):
+                    # Enter pressed; toggle this address for spending
+                    self.selected_addrs ^= {u.address}
+                elif k == ord("L"):
+                    enter_label = True
+
+            addr_str = u.address
+            if u.address in self.selected_addrs:
+                attrslist.append(colr(4))
+                addr_str = f"✔ {addr_str}"
+
+            line = f"{addr_str:<48}{u.num_confs:>10}{u.amount:>12}"
+
             with attrs(self.balance_win, *attrslist):
-                _s(self.balance_win, starty + i, startx, line)
+                _s(self.balance_win, starty + y_idx, startx, line)
 
-            i += 1
+                coin_idx += 1
+                y_idx += 1
 
-        _s(
-            self.balance_win,
-            starty + i + 1,
-            startx,
-            f"{' ':<50}{total_bal:>16}",
-            curses.A_BOLD,
-        )
+                if u.label:
+                    label = sanitize_label(u.label)
+                    if len(label) > (balwidth - 4):
+                        label = label[: (balwidth - 7)] + "..."
+                    label += " " * (bal_line_width - len(label) - 4)
+                    _s(self.balance_win, starty + y_idx, startx, f" └─ {label}")
+                    y_idx += 1
+
+            if enter_label:
+                _s(self.balance_win, starty + y_idx, startx + 1, "Enter label")
+                labelwin = self.balance_win.derwin(
+                    1, balwidth - startx - 5, starty + y_idx + 1, startx + 1
+                )
+                _s(labelwin, 0, 0, " └─ ")
+
+                tb = Textbox(labelwin)
+                scr.refresh()
+                tb.edit()
+                new_label = sanitize_label(tb.gather())
+
+                try:
+                    rpcw = self.config.rpc(wall)
+                    rpcw.setlabel(u.address, new_label)
+                except Exception:
+                    logger.info("failed to set label", exc_info=True)
+                    self.flash_msg = "failed to set label"
+                else:
+                    self.flash_msg = f"set label to '{new_label}'"
+                # Redraw with label
+                return (-1, GoDashboard)
+
+        if sorted_utxos:
+            _s(
+                self.balance_win,
+                starty + y_idx + 1,
+                startx,
+                f"{' ':<54}{total_bal:>16}",
+                curses.A_BOLD,
+            )
 
         # --- Paint the addresses window
 
@@ -937,7 +993,7 @@ class DashboardScene(Scene):
 
         if self.flash_msg:
             with attrs(scr, colr(3)):
-                msg = f" [!] {self.flash_msg}"
+                msg = f" (!) {self.flash_msg}"
                 msg = msg + (" " * (self.width - len(msg) - 1))
                 scr.addstr(0, 0, msg)
 

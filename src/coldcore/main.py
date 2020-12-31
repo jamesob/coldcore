@@ -580,6 +580,7 @@ class UTXO:
     num_confs: int
     txid: str
     vout: int
+    label: str
 
     @classmethod
     def from_listunspent(cls, rpc_outs: t.List[t.Dict]) -> t.List["UTXO"]:
@@ -590,6 +591,7 @@ class UTXO:
                 out["confirmations"],
                 out["txid"],
                 out["vout"],
+                out.get("label", ""),
             )
             for out in rpc_outs
         ]
