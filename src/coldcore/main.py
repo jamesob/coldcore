@@ -844,12 +844,15 @@ def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
     kwargs["shell"] = True
     kwargs["capture_output"] = True
     result = subprocess.run(*args, **kwargs)
+    logger.info(f"sh: {args[0]} -> {result.returncode}")
     return (result.returncode, result.stdout)
 
 
 def _sh(*args, **kwargs) -> subprocess.CompletedProcess:
     kwargs.setdefault("shell", True)
-    return subprocess.run(*args, **kwargs)
+    result = subprocess.run(*args, **kwargs)
+    logger.info(f"sh: {args[0]} -> {result.returncode}")
+    return result
 
 
 def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
@@ -1004,7 +1007,6 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
 class Pass:
     """Access to pass, the password store."""
 
-    @classmethod
     def write(cls, path: str, content: str) -> bool:
         """Return True if write successful."""
         # TODO maybe detect whether or not we're overwriting and warn
@@ -1020,7 +1022,6 @@ class Pass:
         proc.communicate(content.encode())
         return proc.returncode == 0
 
-    @classmethod
     def read(self, path: str, action: str = "Requesting to read") -> Op[str]:
         """Return None if path doesn't exist."""
         F.alert(f"{action} from pass: {path}")
@@ -1037,7 +1038,6 @@ class GPG:
     def __init__(self):
         self.gpg_path: Op[str] = _get_gpg_command()
 
-    @classmethod
     def write(self, path: str, content: str) -> bool:
         """Return True if write successful."""
         logger.info(f"Writing to GPG: {path}")
@@ -1056,13 +1056,15 @@ class GPG:
 
         with open(path, "w") as f:
             proc = subprocess.Popen(
-                f"gpg {gpg_mode}", shell=True, stdout=f, stdin=subprocess.PIPE
+                f"{self.gpg_path} {gpg_mode}",
+                shell=True,
+                stdout=f,
+                stdin=subprocess.PIPE,
             )
             proc.communicate(content.encode())
 
         return proc.returncode == 0
 
-    @classmethod
     def read(self, path: str) -> Op[str]:
         p = Path(path)
         if not p.exists():
@@ -1070,7 +1072,7 @@ class GPG:
             return None
 
         logger.info(f"Reading from GPG: {path}")
-        (retcode, content) = _get_stdout(f"gpg -d {p}")
+        (retcode, content) = _get_stdout(f"{self.gpg_path} -d {p}")
 
         if retcode == 0:
             return content.decode().strip()
