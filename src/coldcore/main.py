@@ -880,7 +880,17 @@ def _prepare_send(
     to_address: str,
     amount: str,
     spend_from: Op[t.List[str]],
-):
+    *,
+    write_psbt_file: bool = True,
+    feerate: Op[str] = None,
+    conf_target: Op[int] = None,
+) -> Op[str]:
+    """
+    Args:
+        feerate: in BTC/kB (as expected by `walletcreatefundedpsbt`).
+    Returns:
+        filename of written PSBT, if any.
+    """
     vins = []
 
     if spend_from:
@@ -896,33 +906,36 @@ def _prepare_send(
             if u.address in spend_from:
                 vins.append({"txid": u.txid, "vout": u.vout})
 
+    options: t.Dict[str, t.Any] = {"includeWatching": True}
+
+    if feerate:
+        options["feeRate"] = feerate
+    elif conf_target:
+        options["conf_target"] = conf_target
+
     try:
         result = rpcw.walletcreatefundedpsbt(
             vins,  # inputs for txn (manual coin control)
             [{to_address: amount}],
             0,  # locktime
-            {"includeWatching": True},  # options; 'feeRate'?
+            options,  # options; 'feeRate'?
             True,  # bip32derivs - include BIP32 derivation paths for pubkeys if known
         )
     except Exception as e:
         # error code: -5 indicates bad address; handle that.
         if e.error.get("code") == -5:  # type: ignore
             F.warn(f"Bad address specified: {e}")
-            return False
+            return None
         raise
 
-    nowstr = datetime.datetime.now().strftime("%Y%m%d-%H%M")
-    filename = f"unsigned-{nowstr}.psbt"
-    Path(filename).write_bytes(base64.b64decode(result["psbt"]))
-    info = rpcw.decodepsbt(result["psbt"])
-    num_inputs = len(info["inputs"])
-    num_outputs = len(info["outputs"])
+    print_tx_info(rpcw, result["psbt"], amount, changepos=result["changepos"])
+    filename = None
 
-    fee = result["fee"]
-    perc = (fee / Decimal(amount)) * 100
-    F.info(f"{num_inputs} inputs, {num_outputs} outputs")
-    F.info(f"fee: {result['fee']} BTC ({perc:.2f}% of amount)")
-    F.done(f"wrote PSBT to {filename} - sign with coldcard")
+    if write_psbt_file:
+        nowstr = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        filename = f"unsigned-{nowstr}.psbt"
+        Path(filename).write_bytes(base64.b64decode(result["psbt"]))
+        F.done(f"wrote PSBT to {filename} - sign with coldcard")
 
     return filename
 
@@ -959,17 +972,16 @@ def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
     return True
 
 
-def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
-    """Display information about the transaction to be performed and confirm."""
-    info = rpcw.decoderawtransaction(hex_val)
+def print_tx_info(
+    rpcw: BitcoinRPC, psbt_hex: str, amount: Op[str] = None, changepos: Op[int] = None
+):
     psbtinfo = rpcw.decodepsbt(psbt_hex)
+    info = psbtinfo["txt"]
     outs: t.List[t.Tuple[str, Decimal]] = []
 
     for out in info["vout"]:
         addrs = ",".join(out["scriptPubKey"]["addresses"])
         outs.append((addrs, out["value"]))
-
-    F.alert("About to send a transaction:\n")
 
     for i in psbtinfo["inputs"]:
         # TODO does this mean we only support segwit transactions?
@@ -982,7 +994,7 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
 
     F.p()
 
-    for o in outs:
+    for i, o in enumerate(outs):
         try:
             addr_info = rpcw.getaddressinfo(o[0])
         except Exception:
@@ -992,15 +1004,25 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
         amt = bold(green(f"{o[1]} BTC"))
         yours = addr_info["ismine"] or addr_info["iswatchonly"]
         yours_str = "  (your address)" if yours else ""
-        F.blank(f" -> {bold(o[0])}  ({amt}){yours_str}")
 
+        change_str = f" ({yellow('change')})" if i == changepos else ""
+        F.blank(f" -> {bold(o[0])}  ({amt}){yours_str}{change_str}")
+
+    fee = psbtinfo["fee"]
+    perc_str = ""
+
+    if amount:
+        perc = (fee / Decimal(amount)) * 100
+        perc_str = f"({perc:.2f}% of amount)"
+    F.info(f"fee: {fee} BTC {perc_str}")
+
+
+def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
+    """Display information about the transaction to be performed and confirm."""
+    F.alert("About to send a transaction:\n")
+    print_tx_info(rpcw, psbt_hex)
     print()
-
-    inp = input(f" {yellow('?')}  look okay? [y/N]: ").strip().lower()
-
-    if inp != "y":
-        return False
-    return True
+    return "y" == input(f" {yellow('?')}  look okay? [y/N]: ").strip().lower()
 
 
 # --- Config management and storage utilities ---------------------------------

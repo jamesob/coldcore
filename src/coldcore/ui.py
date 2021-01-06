@@ -766,6 +766,9 @@ class DashboardScene(Scene):
                 except Exception:
                     logger.info("call to getnewadddress failed", exc_info=True)
 
+        if k == ord("S"):
+            send_menu(self.selected_addrs)
+
         utxo_addrs = {u.address for u in self.utxos.values()}
         # Strip out used addresses.
         self.new_addrs = [a for a in self.new_addrs if a not in utxo_addrs]
@@ -1099,9 +1102,21 @@ def _get_utxo_lines(rpcw, controller, utxos):
             return
 
 
+def send_menu(from_addrs: t.Optional[t.List[str]] = None):
+    from_addrs = from_addrs or []
+    curses.endwin()
+    width = shutil.get_terminal_size().columns
+
+    def clear():
+        os.system("cls" if os.name == "nt" else "clear")
+
+    addr = input("addresss to send to? ")
+
+
 GoHome = Action()
 GoSetup = Action()
 GoDashboard = Action()
+GoSend = Action()
 Quit = Action()
 
 
