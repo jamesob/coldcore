@@ -648,6 +648,7 @@ class GlobalConfig:
 
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
         wall_rpc = wallet.bitcoind_json_url if wallet else None
+
         return get_rpc(
             # The ordering of RPC preference is important here.
             cli.args.rpc or wall_rpc or self.bitcoind_json_url,
