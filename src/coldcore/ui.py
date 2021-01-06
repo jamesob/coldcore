@@ -163,7 +163,7 @@ class OutputFormatter:
         self.p(f"    {'-' * len(s)}")
         self.p()
 
-    def finish(self, config=None, wallet=None) -> t.Tuple[int, Action]:
+    def finish_setup(self, config=None, wallet=None) -> t.Tuple[int, Action]:
         self.p()
         time.sleep(1)
         self.blank("   enjoy your wallet, and remember...")
@@ -208,7 +208,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     done = formatter.done
     task = formatter.task
     spin = formatter.spin
-    finish = formatter.finish
+    finish = formatter.finish_setup
 
     title = cyan(
         f"""
@@ -698,14 +698,14 @@ class DashboardScene(Scene):
         wall = self.wallet_configs[0]
         t1 = threading.Thread(
             target=_get_utxo_lines,
-            args=(self.config.rpc(wall), self.controller, self.utxos),
+            args=(self.config.rpc(wall, timeout=2), self.controller, self.utxos),
         )
         t1.start()
         self.threads.append(t1)
 
         t2 = threading.Thread(
             target=_get_new_blocks,
-            args=(self.config.rpc(), self.blocks),
+            args=(self.config.rpc(timeout=2), self.blocks),
         )
         t2.start()
         self.threads.append(t2)
@@ -1190,6 +1190,7 @@ def attrs(scr, *attrs):
 
 
 def start_ui(config, wallet_configs, controller, action=None):
+    formatter = OutputFormatter()
     try:
         curses.wrapper(draw_menu, config, wallet_configs, controller, action)
         os.system("cls" if os.name == "nt" else "clear")
@@ -1197,8 +1198,15 @@ def start_ui(config, wallet_configs, controller, action=None):
         logger.exception(
             "curses hit an error! the terminal might be too small, try resizing."
         )
-        OutputFormatter().warn(
-            "The UI crashed! Terminal might be too small, try resizing."
-        )
-
+        print()
+        formatter.warn("The UI crashed! Terminal might be too small, try resizing.")
+        print()
+        sys.exit(1)
+    except socket.timeout:
+        logger.exception("RPC connection timed out")
+        print()
+        formatter.warn("Unable to connect to Bitcoin Core RPC - are you sure ")
+        formatter.warn("it is running and the RPC URL you gave is correct?")
+        formatter.alert("See `--rpc` in `coldcore --help`")
+        print()
         sys.exit(1)
