@@ -965,10 +965,8 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
         pre = "you can encrypt your config file with"
 
         if controller.has_gpg():
-            if (
-                inp("do you want to use GPG to encrypt your coldcore config? [y/N] ")
-                == "y"
-            ):
+            prompt = "do you want to use GPG to encrypt your coldcore config? [y/N] "
+            if inp(prompt) == "y":
                 use_gpg = True
 
         if controller.has_pass():
