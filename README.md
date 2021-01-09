@@ -1,6 +1,6 @@
 <h1 align="center"><code>coldcore</code></h1>
 
-<div align="center">Trust-minimized, airgapped hardware wallet control</div>
+<div align="center">Trust-minimized, airgapped Bitcoin management</div>
 
 <br />
 <div align="center">
