@@ -1,4 +1,4 @@
-<h1 align="center">coldcore</h1>
+<h1 align="center"><code>coldcore</code></h1>
 
 <div align="center">Trust-minimized, airgapped hardware wallet control</div>
 
