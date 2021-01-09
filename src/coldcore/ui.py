@@ -12,7 +12,6 @@ import threading
 import platform
 import base64
 import datetime
-import shutil
 import os
 import json
 import decimal
@@ -195,7 +194,6 @@ class MenuItem(namedtuple("MenuItem", "idx,title,action")):
 
 def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     curses.endwin()
-    width = shutil.get_terminal_size().columns
     os.system("cls" if os.name == "nt" else "clear")
 
     formatter = OutputFormatter()
