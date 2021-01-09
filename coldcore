@@ -1870,31 +1870,43 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
         if k == -1:
             statusbarstr += " | waiting"
 
-        # Render status bar
-        with attrs(scr, colr(3)):
-            try:
-                scr.addstr(height - 1, 0, statusbarstr[:width])
-                scr.addstr(
-                    height - 1,
-                    len(statusbarstr),
-                    (" " * (width - len(statusbarstr) - 1))[:width],
-                )
-                # TODO better status bar
-            except Exception:
-                pass
+        try:
+            # Render status bar
+            with attrs(scr, colr(3)):
+                try:
+                    scr.addstr(height - 1, 0, statusbarstr[:width])
+                    scr.addstr(
+                        height - 1,
+                        len(statusbarstr),
+                        (" " * (width - len(statusbarstr) - 1))[:width],
+                    )
+                    # TODO better status bar
+                except Exception:
+                    pass
 
-        if action == GoHome:
-            (k, action) = home.draw(k)
-        elif action == GoSetup:
-            config, wallet = run_setup(config, controller)
-            if config and wallet:
-                for view in (home, dashboard):
-                    view.config = config
-                    view.wallet_configs = [wallet]
-            k = -1
-            action = GoHome
-        elif action == GoDashboard:
-            (k, action) = dashboard.draw(k)
+            if action == GoHome:
+                (k, action) = home.draw(k)
+            elif action == GoSetup:
+                config, wallet = run_setup(config, controller)
+                if config and wallet:
+                    for view in (home, dashboard):
+                        view.config = config
+                        view.wallet_configs = [wallet]
+                k = -1
+                action = GoHome
+            elif action == GoDashboard:
+                (k, action) = dashboard.draw(k)
+        except curses.error:
+            scr = curses.initscr()
+            scr.clear()
+            scr.timeout(400)
+            scr.refresh()
+            scr.addstr(1, 1, "! terminal too small.")
+            scr.addstr(2, 1, "! resize to make larger")
+            scr.addstr(3, 1, "! or press 'q' to exit.")
+            scr.refresh()
+            time.sleep(0.3)
+            k = scr.getch()
 
         if k == ord("q") or action == Quit:
             break
@@ -1915,9 +1927,6 @@ def start_ui(config, wallet_configs, controller, action=None):
         curses.wrapper(draw_menu, config, wallet_configs, controller, action)
         os.system("cls" if os.name == "nt" else "clear")
     except curses.error:
-        logger.exception(
-            "curses hit an error! the terminal might be too small, try resizing."
-        )
         print()
         formatter.warn("The UI crashed! Terminal might be too small, try resizing.")
         print()
