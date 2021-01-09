@@ -1,6 +1,4 @@
-![coldcore](docs/img/logo.png)
-
-<h1 align="center"><pre>COLDCORE</pre></h1>
+<h1 align="center">coldcore</h1>
 
 <div align="center">Trust-minimized, airgapped hardware wallet control</div>
 
