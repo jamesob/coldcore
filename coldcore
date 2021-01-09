@@ -931,12 +931,17 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     finish = formatter.finish_setup
 
     title = cyan(
-        f"""
-              __
-.-----.-----.|  |_.--.--.-----.
-|__ --|  -__||   _|  |  |  _  |
-|_____|_____||____|_____|   __| {'=' * (max(0, width - 45))}
-                        |__|
+        r"""
+                          .
+                        .o8
+    .oooo.o  .ooooo.  .o888oo oooo  oooo  oo.ooooo.
+   d88(  "8 d88' `88b   888   `888  `888   888' `88b
+   `"Y88b.  888ooo888   888    888   888   888   888
+   o.  )88b 888    .o   888 .  888   888   888   888
+   8""888P' `Y8bod8P'   "888"  `V88V"V8P'  888bod8P'
+                                           888
+                                          o888o
+
 """
     )
     p(title)
@@ -957,12 +962,15 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     use_gpg = False
     if not config:
-        section("config file setup")
+        section("coldcore config file setup")
         delay()
         pre = "you can encrypt your config file with"
 
         if controller.has_gpg():
-            if inp("do you want to use GPG to encrypt your config? [y/N] ") == "y":
+            if (
+                inp("do you want to use GPG to encrypt your coldcore config? [y/N] ")
+                == "y"
+            ):
                 use_gpg = True
 
         if controller.has_pass():
@@ -978,6 +986,10 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
         if config.loaded_from.endswith(".gpg"):
             use_gpg = True
         done(f"loaded config from {yellow(config.loaded_from)}")
+
+    if not config:
+        warn("Couldn't obtain config. Exiting.")
+        sys.exit(1)
 
     p()
 
@@ -1326,7 +1338,8 @@ class HomeScene(Scene):
 ░╚════╝░░╚════╝░╚══════╝╚═════╝░░╚════╝░░╚════╝░╚═╝░░╚═╝╚══════╝
     """
 
-        title_len = len(title.splitlines()[2])
+        titlelines = title.splitlines()
+        title_len = len(titlelines[2])
         subtitle = "your monetary glue"
 
         # Centering calculations
@@ -1335,20 +1348,18 @@ class HomeScene(Scene):
         start_y = height // 4
 
         if wconfigs:
+            # TODO this will run off the end of the screen quickly
             keystr = f"Wallets: {', '.join([w.name for w in wconfigs])}".format(k)[
                 : width - 1
             ]
             start_x_keystr = int((width // 2) - (len(keystr) // 2) - len(keystr) % 2)
             scr.addstr(start_y + title_height + 4, start_x_keystr, keystr[:width])
 
-        title = "\n".join(
-            ((" " * start_x_title) + line)[: width - start_y]
-            for line in title.splitlines()
-        )
         start_x_subtitle = int((width // 2) - (len(subtitle) // 2) - len(subtitle) % 2)
 
         with attrs(scr, colr(2), curses.A_BOLD):
-            scr.addstr(start_y, width // 2, title)
+            for i, line in enumerate(titlelines):
+                scr.addstr(start_y + i, start_x_title, line)
 
         scr.addstr(start_y + title_height, start_x_subtitle, subtitle[:width])
         scr.addstr(
