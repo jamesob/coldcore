@@ -1,6 +1,14 @@
 ![coldcore](docs/img/logo.png)
 
-![build status](https://github.com/jamesob/coldcore/workflows/build/badge.svg)
+<h1 align="center"><pre>COLDCORE</pre></h1>
+
+<div align="center">Trust-minimized, airgapped hardware wallet control</div>
+
+<br />
+<div align="center">
+  <a href="https://github.com/jamesob/coldcore/workflows/build"><img src="https://github.com/jamesob/coldcore/workflows/build/badge.svg" alt="build"/></a>
+</div>
+<br />
 
 **This is experimental software. Wait for a formal release before use with real
 funds.**
