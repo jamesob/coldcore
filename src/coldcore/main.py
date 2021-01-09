@@ -1170,7 +1170,7 @@ def create_config(conf_path, bitcoind_json_url: str) -> Op[GlobalConfig]:
     def confirm_overwrite() -> bool:
         if Path(conf_path).exists():
             prompt = (
-                f"Are you sure you want to overwrite "
+                f" ?  Are you sure you want to overwrite "
                 f"the existing file at {conf_path}? [y/N] "
             )
             return input(prompt).lower() == "y"

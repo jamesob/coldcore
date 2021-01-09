@@ -616,7 +616,7 @@ class HomeScene(Scene):
 ░╚════╝░░╚════╝░╚══════╝╚═════╝░░╚════╝░░╚════╝░╚═╝░░╚═╝╚══════╝
     """
 
-        titlelines = title.splitlines()
+        titlelines = [i for i in title.splitlines() if i.strip()]
         title_len = len(titlelines[2])
         subtitle = "your monetary glue"
 
@@ -1122,6 +1122,7 @@ TermOpts = _TermOpts()
 
 
 def draw_menu(scr, config, wallet_configs, controller, action=None):
+    wallet_configs = wallet_configs or []
     # Clear and refresh the screen for a blank canvas
     scr.clear()
     scr.refresh()
@@ -1177,10 +1178,11 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
                 (k, action) = home.draw(k)
             elif action == GoSetup:
                 config, wallet = run_setup(config, controller)
+                # Reinitialize the scenes
                 if config and wallet:
-                    for view in (home, dashboard):
-                        view.config = config
-                        view.wallet_configs = [wallet]
+                    wallet_configs.append(wallet)
+                    home = HomeScene(scr, config, wallet_configs, controller)
+                    dashboard = DashboardScene(scr, config, wallet_configs, controller)
                 k = -1
                 action = GoHome
             elif action == GoDashboard:
