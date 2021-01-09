@@ -4,7 +4,7 @@
 
 <br />
 <div align="center">
-  <a href="https://github.com/jamesob/coldcore/workflows/build"><img src="https://github.com/jamesob/coldcore/workflows/build/badge.svg" alt="build"/></a>
+  <a href="https://github.com/jamesob/coldcore/actions"><img src="https://github.com/jamesob/coldcore/workflows/build/badge.svg" alt="build"/></a>
 </div>
 <br />
 
