@@ -205,7 +205,7 @@ To send, use a combination of `prepare-send` and `broadcast`:
 ```sh
 % SEND_TO_ADDR=tb1qj2sjxuhxqyfgxkf6kqnthskqtum8hr2zr0l95j
 
-% ./coldcore prepare-send SEND_TO_ADDR 0.00001
+% ./coldcore prepare-send $SEND_TO_ADDR 0.00001
  -- 1 inputs, 2 outputs
  -- fee: 0.00000141 BTC (14.10% of amount)
  ✔  wrote PSBT to unsigned-20201222-0920.psbt - sign with coldcard
