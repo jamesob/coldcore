@@ -519,9 +519,10 @@ class CCWallet(Wallet):
 
         def desc_to_checksum(desc: WpkhDescriptor) -> str:
             try:
+                # TODO this isn't available in 0.18
                 return rpc.getdescriptorinfo(desc.base)["checksum"]
             except JSONRPCError:
-                # TODO handle
+                F.warn("Please upgrade Bitcoin Core to a version greater than 0.19")
                 raise
 
         descs = []

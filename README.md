@@ -48,7 +48,7 @@ Coldcard, and not much else.
   - This has only been nominally tested on macOS so expect bugs
   - Support for Windows is planned, but I'll need someone with a Windows computer to
     help
-- Bitcoin Core 0.18+
+- Bitcoin Core 0.19+
 - Python 3.7+ (your system probably already has this)
 - Coldcard
 

@@ -383,6 +383,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     p()
     done("scan of UTXO set complete!")
 
+    # TODO this will fail if we timed out
     unspents = scan_result["result"]["unspents"]
     bal = sum([i["amount"] for i in unspents])
     bal_str = yellow(bold(f"{bal} BTC"))
@@ -1032,9 +1033,9 @@ def to_clipboard(s: str) -> bool:
         cmd = "xclip -selection clipboard"
     elif plat == "Darwin":
         cmd = "pbcopy"
-    # TODO windows support
 
-    sh(f"echo -n {s} | {cmd}")
+    # TODO windows support
+    sh(f"printf '{s}' | {cmd}")
     return True
 
 
