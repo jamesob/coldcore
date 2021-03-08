@@ -2830,25 +2830,23 @@ def _prepare_send(
     num_inputs = len(info["inputs"])
     num_outputs = len(info["outputs"])
 
-    # Altered code from confirm_broadcast to display inputs and outputs
-    psbtinfo = info # BG edit
-    tx = info["tx"] # BG edit
-    inputs = tx["vin"] # BG edit
-    outputs = tx["vout"] # BG edit
-    outs = outputs # BG edit
-    total_in_amt = 0 # BG edit
-    total_out_amt = 0 # BG edit
+    # Get info from psbt
+    psbtinfo = info
+    tx = info["tx"]
+    inputs = tx["vin"]
+    outputs = tx["vout"]
+    outs = outputs
+    total_in_amt = 0
+    total_out_amt = 0
     change = 0
-    # outs: t.List[t.Tuple[str, Decimal]] = []
-    # for out in info["vout"]:
-    #     addrs = ",".join(out["scriptPubKey"]["addresses"])
-    #     outs.append((addrs, out["value"]))
+
     # Add up total input amount
     for i in psbtinfo["inputs"]:
         # TODO does this mean we only support segwit transactions?
         wit = i["witness_utxo"]
         amt = float(wit["amount"])
         total_in_amt = total_in_amt + amt
+
     # Add up total output amount
     for o in outs:
         addr = o['scriptPubKey']['addresses'][0]
@@ -2871,13 +2869,7 @@ def _prepare_send(
     F.info(f"network fee: {result['fee']} BTC ({perc:.2f}% of amount)")
     F.info(f"change back: {change} BTC") # TODO: test calculation
     F.info("outputs:")
-    # F.info("outputs:")
-    # F.p()
-    # for output in outputs:
-    #     # TODO: Does 'addresses' always contain one address?
-    #     address = output['scriptPubKey']['addresses'][0]
-    #     F.blank(f"  {yellow(address)}: {str(output['value'])} BTC")
-    # F.p()
+
     # Display outputs
     for o in outs:
         addr = o['scriptPubKey']['addresses'][0]
