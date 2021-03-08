@@ -706,8 +706,8 @@ class GlobalConfig:
         # Ensure that the created file is only readable by the owner.
         if p.exists():
             if platform.system() == "Windows":
-                F.warn(f"Before continuing, please ensure the configuration file")
-                F.warn(f"is only readable by your Windows user account.")
+                F.warn("Before continuing, please ensure the configuration file")
+                F.warn("is only readable by your Windows user account.")
             else:
                 _sh(f"chmod 600 {p}")
 
