@@ -923,9 +923,9 @@ def _prepare_send(
     psbtinfo = info
     tx = info["tx"]
     outs = tx["vout"]
-    total_in_amt = 0
-    total_out_amt = 0
-    change = 0
+    total_in_amt = 0.0
+    total_out_amt = 0.0
+    change = 0.0
 
     # Add up total input amount
     for i in psbtinfo["inputs"]:
@@ -965,10 +965,10 @@ def _prepare_send(
         except Exception:
             # TODO handle this
             raise
-        amt = bold(green(f"{o['value']} BTC"))
+        display_amt = bold(green(f"{o['value']} BTC"))
         yours = addr_info["ismine"] or addr_info["iswatchonly"]
         yours_str = "  (your address)" if yours else ""
-        F.blank(f" -> {bold(addr)}  ({amt}){yours_str}")
+        F.blank(f" -> {bold(addr)}  ({display_amt}){yours_str}")
 
     F.p()
     F.done(f"wrote PSBT to {filename} - sign with coldcard")
