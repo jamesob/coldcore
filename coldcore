@@ -771,7 +771,8 @@ def open_file_browser():
         cmd = "xdg-open ."
     elif plat == "Darwin":
         cmd = "open ."
-    # TODO windows support
+    elif plat == "Windows":
+        cmd = "explorer ."
 
     subprocess.Popen(
         cmd,
