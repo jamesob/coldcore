@@ -1031,11 +1031,14 @@ def to_clipboard(s: str) -> bool:
             logger.info("xclip not found, cannot copy to clipboard")
             return False
         cmd = "xclip -selection clipboard"
+        sh(f"printf '{s}' | {cmd}")
     elif plat == "Darwin":
         cmd = "pbcopy"
+        sh(f"printf '{s}' | {cmd}")
+    elif plat == "Windows":
+        cmd = "clip"
+        sh(f"echo {s} | {cmd}")
 
-    # TODO windows support
-    sh(f"printf '{s}' | {cmd}")
     return True
 
 
