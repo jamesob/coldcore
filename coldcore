@@ -2830,10 +2830,68 @@ def _prepare_send(
     num_inputs = len(info["inputs"])
     num_outputs = len(info["outputs"])
 
+    # Altered code from confirm_broadcast to display inputs and outputs
+    psbtinfo = info # BG edit
+    tx = info["tx"] # BG edit
+    inputs = tx["vin"] # BG edit
+    outputs = tx["vout"] # BG edit
+    outs = outputs # BG edit
+    total_in_amt = 0 # BG edit
+    total_out_amt = 0 # BG edit
+    change = 0
+    # outs: t.List[t.Tuple[str, Decimal]] = []
+    # for out in info["vout"]:
+    #     addrs = ",".join(out["scriptPubKey"]["addresses"])
+    #     outs.append((addrs, out["value"]))
+    # Add up total input amount
+    for i in psbtinfo["inputs"]:
+        # TODO does this mean we only support segwit transactions?
+        wit = i["witness_utxo"]
+        amt = float(wit["amount"])
+        total_in_amt = total_in_amt + amt
+    # Add up total output amount
+    for o in outs:
+        addr = o['scriptPubKey']['addresses'][0]
+        try:
+            addr_info = rpcw.getaddressinfo(addr)
+        except Exception:
+            # TODO handle this
+            raise
+        amt = float(o["value"])
+        total_out_amt = total_out_amt + amt
+        yours = addr_info["ismine"] or addr_info["iswatchonly"]
+        if yours:
+            change = change + amt
+
     fee = result["fee"]
     perc = (fee / Decimal(amount)) * 100
+
+    F.info(f"total output amount: {total_out_amt} BTC")
     F.info(f"{num_inputs} inputs, {num_outputs} outputs")
-    F.info(f"fee: {result['fee']} BTC ({perc:.2f}% of amount)")
+    F.info(f"network fee: {result['fee']} BTC ({perc:.2f}% of amount)")
+    F.info(f"change back: {change} BTC") # TODO: test calculation
+    F.info("outputs:")
+    # F.info("outputs:")
+    # F.p()
+    # for output in outputs:
+    #     # TODO: Does 'addresses' always contain one address?
+    #     address = output['scriptPubKey']['addresses'][0]
+    #     F.blank(f"  {yellow(address)}: {str(output['value'])} BTC")
+    # F.p()
+    # Display outputs
+    for o in outs:
+        addr = o['scriptPubKey']['addresses'][0]
+        try:
+            addr_info = rpcw.getaddressinfo(addr)
+        except Exception:
+            # TODO handle this
+            raise
+        amt = bold(green(f"{o['value']} BTC"))
+        yours = addr_info["ismine"] or addr_info["iswatchonly"]
+        yours_str = "  (your address)" if yours else ""
+        F.blank(f" -> {bold(addr)}  ({amt}){yours_str}")
+
+    F.p()
     F.done(f"wrote PSBT to {filename} - sign with coldcard")
 
     return filename
