@@ -922,9 +922,7 @@ def _prepare_send(
     # Get info from psbt
     psbtinfo = info
     tx = info["tx"]
-    inputs = tx["vin"]
-    outputs = tx["vout"]
-    outs = outputs
+    outs = tx["vout"]
     total_in_amt = 0
     total_out_amt = 0
     change = 0
@@ -956,7 +954,7 @@ def _prepare_send(
     F.info(f"total output amount: {total_out_amt} BTC")
     F.info(f"{num_inputs} inputs, {num_outputs} outputs")
     F.info(f"network fee: {result['fee']} BTC ({perc:.2f}% of amount)")
-    F.info(f"change back: {change} BTC") # TODO: test calculation
+    F.info(f"change back: {change} BTC")
     F.info("outputs:")
 
     # Display outputs
