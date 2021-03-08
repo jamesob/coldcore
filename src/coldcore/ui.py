@@ -451,7 +451,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     info("great - now let's test your ability to send")
     info(
-        "we're going to send 95% of the value of the last UTXO over "
+        "we're going to send 90% of the value of the last UTXO over "
         "to a new address:"
     )
     sendtoaddr = rpcw.getnewaddress()
