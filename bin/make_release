@@ -1,0 +1,10 @@
+#!/bin/bash
+
+VERSION=$(./coldcore --version | cut -d' ' -f2)
+TAGNAME="v${VERSION}"
+
+git tag -sf -m $TAGNAME $TAGNAME
+git tag -sf -m $TAGNAME stable
+
+echo "Signing release..."
+./bin/sign-release
