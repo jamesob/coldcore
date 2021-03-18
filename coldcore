@@ -1159,7 +1159,9 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     while not got_utxo:
         spin("waiting for transaction")
         utxos = controller.get_utxos(rpcw)
-        got_utxo = utxos.get(receive_addr1)
+        matching = [u for u in utxos.values() if u.address == receive_addr1]
+        if matching:
+            got_utxo = matching[0]
         time.sleep(1)
 
     p()
@@ -1238,7 +1240,9 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     while not inmempool:
         spin("waiting to see the transaction in the mempool")
         utxos = controller.get_utxos(rpcw)
-        got_utxo = utxos.get(sendtoaddr)
+        matching = [u for u in utxos.values() if u.address == sendtoaddr]
+        if matching:
+            got_utxo = matching[0]
 
         if got_utxo:
             inmempool = True
@@ -1411,7 +1415,7 @@ class DashboardScene(Scene):
         self.loop_count = 0
         self.cursorposx = 0
         self.flash_msg = ""
-        self.selected_addrs = set()
+        self.selected_utxos = set()
 
         # Y cursor positions within each window.
         self.wincursoridx = {
@@ -1604,12 +1608,12 @@ class DashboardScene(Scene):
 
                 if k in (ENTER_KEYS + [ord(" ")]):
                     # Enter pressed; toggle this address for spending
-                    self.selected_addrs ^= {u.address}
+                    self.selected_utxos ^= {u.id}
                 elif k == ord("L"):
                     enter_label = True
 
             addr_str = u.address
-            if u.address in self.selected_addrs:
+            if u.id in self.selected_utxos:
                 attrslist.append(colr(4))
                 addr_str = f"✔ {addr_str}"
 
@@ -2488,6 +2492,10 @@ class WpkhDescriptor:
         return cls(base, checksum, is_change)
 
 
+# Type identifying a UTXO: (txid, vout)
+UtxoId = t.Tuple[str, int]
+
+
 @dataclass
 class UTXO:
     address: str
@@ -2510,6 +2518,11 @@ class UTXO:
             )
             for out in rpc_outs
         ]
+
+    @property
+    def id(self) -> UtxoId:
+        """Return a unique identifier for the coin."""
+        return (self.txid, self.vout)
 
 
 class WizardController:
@@ -2600,11 +2613,14 @@ class GlobalConfig:
 
             if conf[key].get("xpub", "").startswith("tpub"):
                 net_name = TESTNET
+            # TODO RPC for one wallet config may not necessarily be available,
+            # but anothers' might work. Ensure this doesn't crash.
             rpc = c.rpc(net_name=net_name)
 
             try:
                 wallets.append(WalletClass.from_ini(key, rpc, conf))
             except Exception:
+                # TODO flash a warning in the UI that we couldn't read the config
                 msg = f"Unable to read config section '{key}'"
                 logger.exception(msg)
                 F.warn(msg)
@@ -2699,6 +2715,10 @@ def discover_rpc(
     return None
 
 
+def _is_already_loaded_err(e: JSONRPCError) -> bool:
+    return 'already loaded' in str(e).lower()
+
+
 def get_rpc(
     url: Op[str] = None,
     wallet: Op[Wallet] = None,
@@ -2733,7 +2753,7 @@ def get_rpc(
             plain_rpc.loadwallet(wallet.name)
         except JSONRPCError as e:
             # Wallet already loaded.
-            if e.error.get("code") != -4:  # type: ignore
+            if not _is_already_loaded_err(e):
                 raise
         cache[cache_key] = _get_rpc_inner(
             url, net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
@@ -2777,14 +2797,14 @@ def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
     try:
         rpc.createwallet(wall.bitcoind_name, True)
     except JSONRPCError as e:
-        if e.error.get("code") != -4:  # type: ignore
+        if not _is_already_loaded_err(e):
             # Wallet already exists; ok.
             raise
 
 
-def get_utxos(rpcw: BitcoinRPC) -> t.Dict[str, "UTXO"]:
+def get_utxos(rpcw: BitcoinRPC) -> t.Dict[UtxoId, "UTXO"]:
     return {
-        u.address: u
+        u.id: u
         for u in UTXO.from_listunspent(rpcw.listunspent(0))  # includes unconfirmed
     }
 

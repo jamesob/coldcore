@@ -574,6 +574,10 @@ class WpkhDescriptor:
         return cls(base, checksum, is_change)
 
 
+# Type identifying a UTXO: (txid, vout)
+UtxoId = t.Tuple[str, int]
+
+
 @dataclass
 class UTXO:
     address: str
@@ -596,6 +600,11 @@ class UTXO:
             )
             for out in rpc_outs
         ]
+
+    @property
+    def id(self) -> UtxoId:
+        """Return a unique identifier for the coin."""
+        return (self.txid, self.vout)
 
 
 class WizardController:
@@ -686,11 +695,14 @@ class GlobalConfig:
 
             if conf[key].get("xpub", "").startswith("tpub"):
                 net_name = TESTNET
+            # TODO RPC for one wallet config may not necessarily be available,
+            # but anothers' might work. Ensure this doesn't crash.
             rpc = c.rpc(net_name=net_name)
 
             try:
                 wallets.append(WalletClass.from_ini(key, rpc, conf))
             except Exception:
+                # TODO flash a warning in the UI that we couldn't read the config
                 msg = f"Unable to read config section '{key}'"
                 logger.exception(msg)
                 F.warn(msg)
@@ -785,6 +797,10 @@ def discover_rpc(
     return None
 
 
+def _is_already_loaded_err(e: JSONRPCError) -> bool:
+    return 'already loaded' in str(e).lower()
+
+
 def get_rpc(
     url: Op[str] = None,
     wallet: Op[Wallet] = None,
@@ -819,7 +835,7 @@ def get_rpc(
             plain_rpc.loadwallet(wallet.name)
         except JSONRPCError as e:
             # Wallet already loaded.
-            if e.error.get("code") != -4:  # type: ignore
+            if not _is_already_loaded_err(e):
                 raise
         cache[cache_key] = _get_rpc_inner(
             url, net_name=wallet.net_name, wallet_name=wallet.name, **kwargs
@@ -863,14 +879,14 @@ def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
     try:
         rpc.createwallet(wall.bitcoind_name, True)
     except JSONRPCError as e:
-        if e.error.get("code") != -4:  # type: ignore
+        if not _is_already_loaded_err(e):
             # Wallet already exists; ok.
             raise
 
 
-def get_utxos(rpcw: BitcoinRPC) -> t.Dict[str, "UTXO"]:
+def get_utxos(rpcw: BitcoinRPC) -> t.Dict[UtxoId, "UTXO"]:
     return {
-        u.address: u
+        u.id: u
         for u in UTXO.from_listunspent(rpcw.listunspent(0))  # includes unconfirmed
     }
 
