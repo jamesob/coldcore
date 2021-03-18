@@ -78,9 +78,12 @@ Not super familiar with the commandline? On macOS? Check out the [easy setup tut
     - `gpg --keyserver keyserver.ubuntu.com --recv-keys 0x25F27A38A47AD566`
     - You can verify this fingerprint on my Twitter: https://twitter.com/jamesob
 1. Get the sigs for the release:
-    - Get the signature: `curl -O http://img.jameso.be/sigs/coldcore-$(./coldcore --version).asc`
-    - Verify the signature: `gpg coldcore-[version].asc`
-    - Ensure it matches: `sha256sum coldcore`
+    - Get the signature
+      - `curl -O http://img.jameso.be/sigs/coldcore-$(./coldcore --version | cut -d' ' -f2).asc`
+    - Verify the signature
+      - `gpg coldcore-[version].asc`
+    - Ensure it matches 
+      - `sha256sum coldcore`
 
 ## Experimenting with testnet
 
