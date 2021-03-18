@@ -45,7 +45,6 @@ Coldcard, and not much else.
 ## Requirements
 
 - Linux or MacOS
-  - This has only been nominally tested on macOS so expect bugs
   - Support for Windows is planned, but I'll need someone with a Windows computer to
     help
 - Bitcoin Core 0.19+
