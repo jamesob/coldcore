@@ -54,6 +54,10 @@ Coldcard, and not much else.
 
 ![home](docs/img/splash.png)
 
+## macOS newbie-friendly install process
+
+Not super familiar with the commandline? On macOS? Check out the [easy setup tutorial here.](docs/install-macos.md)
+
 ## Install process
 
 1. Buy a [Coldcard](https://coldcardwallet.com)
