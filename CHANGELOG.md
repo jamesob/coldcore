@@ -9,3 +9,12 @@
 - RPC detection fix
 - Remove `curses.A_ITALIC` use (fails on macOS)
 - Rescan only when there are UTXOs
+
+
+## 0.1.2-beta
+
+- Improve various failure modes
+  - RPC failures
+  - Window resizes
+- Fix UTXO unique-on-address assumption
+- Beginning of Windows support (@billygarrison)
