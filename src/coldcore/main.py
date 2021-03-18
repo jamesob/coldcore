@@ -48,7 +48,7 @@ from .crypto import xpub_to_fp
 from .ui import start_ui, yellow, bold, green, red, GoSetup, OutputFormatter, DecimalEncoder, to_clipboard  # noqa
 # fmt: on
 
-__VERSION__ = "0.1.1-alpha"
+__VERSION__ = "0.2.0-beta"
 
 root_logger = logging.getLogger()
 logger = logging.getLogger("main")
