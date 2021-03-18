@@ -33,6 +33,7 @@ import textwrap
 import json
 import io
 import os
+import platform
 from pathlib import Path
 from typing import Optional as Op
 from dataclasses import dataclass, field
@@ -717,8 +718,11 @@ class GlobalConfig:
 
         # Ensure that the created file is only readable by the owner.
         if p.exists():
-            # FIXME make cross-platform
-            _sh(f"chmod 600 {p}")
+            if platform.system() == "Windows":
+                F.warn("Before continuing, please ensure the configuration file")
+                F.warn("is only readable by your Windows user account.")
+            else:
+                _sh(f"chmod 600 {p}")
 
     def add_new_wallet(self, w: Wallet):
         logger.info("Adding new wallet to config: %s", w.as_ini_dict)
