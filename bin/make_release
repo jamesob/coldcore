@@ -3,8 +3,16 @@
 VERSION=$(./coldcore --version | cut -d' ' -f2)
 TAGNAME="v${VERSION}"
 
+if $(ls -1 sigs | grep $TAGNAME >/dev/null); then
+    read -p "Tag '${TAGNAME}' already exists, continue? (y/n) " confirm
+    [ $confirm = "y" ] || exit 1
+fi
+
+echo "Signing for tag '$TAGNAME'"
 git tag -sf -m $TAGNAME $TAGNAME
+
+echo "Signing for tag 'stable'"
 git tag -sf -m $TAGNAME stable
 
 echo "Signing release..."
-./bin/sign-release
+./bin/sign_release
