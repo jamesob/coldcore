@@ -65,8 +65,6 @@ Not super familiar with the commandline? On macOS? Check out the [easy setup tut
     - macOS: install [homebrew](https://brew.sh/), run `brew install python3`
     - [Linux](https://realpython.com/installing-python)
 1. Clone this repo: `git clone https://github.com/jamesob/coldcore`
-1. Make coldcore executable and run it
-    - `cd coldcore; chmod +x coldcore; ./coldcore --help`
 1. Optionally, install coldcore to your path
     - `cp coldcore ~/.local/bin/coldcore  # or somewhere on your PATH`
 1. Boot 'er up
