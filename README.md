@@ -15,7 +15,7 @@ A trust-minimized Bitcoin wallet interface that relies only on Bitcoin Core.
 
 - Zero install process for most platforms
 - Designed for simplicity and auditability
-- No GUI, terminal only (curses and command-line) 
+- No GUI, terminal only (curses and command-line)
 - Works in terms of script descriptors and PSBTs
 - Minimal dependencies: Bitcoin Core, Python 3 interpreter, nothing else
 - Supports only airgapped, opensource hardware wallets
@@ -82,7 +82,7 @@ Not super familiar with the commandline? On macOS? Check out the [easy setup tut
       - `curl -O http://img.jameso.be/sigs/coldcore-$(./coldcore --version | cut -d' ' -f2).asc`
     - Verify the signature
       - `gpg coldcore-[version].asc`
-    - Ensure it matches 
+    - Ensure it matches
       - `sha256sum coldcore`
 
 ## Experimenting with testnet
@@ -154,7 +154,7 @@ If you want to read through, I recommend starting with the `src/coldcore` tree.
 .
 ├── bin
 │   ├── compile                    # generates final `coldcore` script
-│   └── sign_release 
+│   └── sign_release
 ├── coldcore
 ├── sigs                           # signatures for verification
 │   └── coldcore-0.1.0-alpha.asc
@@ -163,7 +163,7 @@ If you want to read through, I recommend starting with the `src/coldcore` tree.
     │   ├── crypto.py              # a few basic cryptographic utilities
     │   ├── __init__.py
     │   ├── main.py                # most logic is here; wallet ops, CLI, models
-    │   ├── test_coldcard.py 
+    │   ├── test_coldcard.py
     │   ├── test_crypto.py
     │   ├── thirdparty
     │   │   ├── bitcoin_rpc.py     # taken from python-bitcoinlib
@@ -392,7 +392,7 @@ have to install.
 ## Donate
 
 If you'd like to donate to this project, send Bitcoin to the address signed below
-(`bc1qgyq7lxmk359c3vyxzz674pr8a9gnguxkgdw55p`), or 
+(`bc1qgyq7lxmk359c3vyxzz674pr8a9gnguxkgdw55p`), or
 [sponsor me on Github](https://github.com/sponsors/jamesob).
 
 ```
