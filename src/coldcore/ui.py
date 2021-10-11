@@ -21,7 +21,6 @@ from pathlib import Path
 from collections import namedtuple
 from curses.textpad import Textbox
 
-
 logger = logging.getLogger("ui")
 
 
@@ -345,6 +344,11 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     done("parsed xpub as ")
     blank(f"  {yellow(wallet.descriptor_base)}")
     p()
+
+    walletname = inp(f"name of this wallet? [{wallet.name}] ")
+    if walletname:
+        wallet.name = walletname
+
     # Ensure we save the RPC connection we initialized with.
     wallet.bitcoind_json_url = rpc.url
     config.add_new_wallet(wallet)
