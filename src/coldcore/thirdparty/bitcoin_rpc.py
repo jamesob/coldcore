@@ -191,13 +191,14 @@ class BitcoinRPC(object):
         else:
             return self._parsed_url.port
 
-    def _getconn(self):
+    def _getconn(self, timeout=None):
         return httplib.HTTPConnection(
-            self._parsed_url.hostname, port=self.port, timeout=self.timeout
+            self._parsed_url.hostname, port=self.port, timeout=timeout,
         )
 
-    def _call(self, service_name, *args):
+    def _call(self, service_name, *args, **kwargs):
         self.__id_count += 1
+        kwargs.setdefault('timeout', self.timeout)
 
         postdata = json.dumps(
             {
@@ -224,7 +225,7 @@ class BitcoinRPC(object):
         backoff = 0.3
         while tries:
             try:
-                conn = self._getconn()
+                conn = self._getconn(timeout=kwargs['timeout'])
                 conn.request("POST", path, postdata, headers)
             except (BlockingIOError, http.client.CannotSendRequest, socket.gaierror):
                 logger.exception(
@@ -291,8 +292,8 @@ class BitcoinRPC(object):
             raise AttributeError
 
         # Create a callable to do the actual call
-        def _call_wrapper(*args):
-            return self._call(name, *args)
+        def _call_wrapper(*args, **kwargs):
+            return self._call(name, *args, **kwargs)
 
         # Make debuggers show <function bitcoin.rpc.name> rather than <function
         # bitcoin.rpc.<lambda>>

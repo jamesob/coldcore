@@ -398,7 +398,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
             f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
             f"(minutes to hours)"
         )
-        blank("  this allows us to find transactions associated with your coins")
+        blank("  this allows us to find transactions associated with your coins\n")
         rescan_thread = threading.Thread(
             target=_run_rescan,
             args=(config.rpc(wallet), rescan_begin_height),
@@ -557,14 +557,14 @@ def _run_scantxoutset(rpcw, args, result):
     try:
         result["result"] = rpcw.scantxoutset(*args)
     except socket.timeout:
-        logger.exception("socket timed out during txoutsetscan (this is expected)")
+        logger.debug("socket timed out during txoutsetscan (this is expected)")
 
 
 def _run_rescan(rpcw, begin_height: int):
     try:
         rpcw.rescanblockchain(begin_height)
     except socket.timeout:
-        logger.exception("socket timed out during rescan (this is expected)")
+        logger.debug("socket timed out during rescan (this is expected)")
 
 
 # Curses is weird and ENTER isn't always ENTER.
@@ -709,9 +709,11 @@ class DashboardScene(Scene):
             return
 
         wall = self.wallet_configs[0]
+        wrpc = self.config.rpc(wall, timeout=2)
+
         t1 = threading.Thread(
             target=_get_utxo_lines,
-            args=(self.config.rpc(wall, timeout=2), self.controller, self.utxos),
+            args=(wrpc, self.controller, self.utxos),
         )
         t1.start()
         self.threads.append(t1)
