@@ -794,7 +794,11 @@ def discover_rpc(
 
 
 def _is_already_loaded_err(e: JSONRPCError) -> bool:
-    return 'already loaded' in str(e).lower()
+    msg = str(e).lower()
+    return (
+        ('already loaded' in msg) or
+        ('duplicate -wallet filename' in msg) or
+        ('database already exists' in msg))
 
 
 def get_rpc(
