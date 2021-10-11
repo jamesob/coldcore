@@ -983,7 +983,13 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     outs: t.List[t.Tuple[str, Decimal]] = []
 
     for out in info["vout"]:
-        addrs = ",".join(out["scriptPubKey"]["addresses"])
+        spk = out["scriptPubKey"]
+        if 'addresses' in spk:
+            # XXX unsure if this is necessary, but might be for older versions of Core.
+            addrs = ",".join(spk["addresses"])
+        elif 'address' in spk:
+            addrs = spk["address"]
+
         outs.append((addrs, out["value"]))
 
     F.alert("About to send a transaction:\n")
@@ -1003,6 +1009,7 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
         try:
             addr_info = rpcw.getaddressinfo(o[0])
         except Exception:
+            print(f"Couldn't get info for output: {o}")
             # TODO handle this
             raise
 
