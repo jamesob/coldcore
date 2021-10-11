@@ -18,3 +18,9 @@
   - Window resizes
 - Fix UTXO unique-on-address assumption
 - Beginning of Windows support (@billygarrison)
+
+
+## 0.1.3
+
+- Allow user-specified wallet names
+- Bugfix: decoderawtransaction address/addresses RPC 
