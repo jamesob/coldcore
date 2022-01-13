@@ -935,10 +935,58 @@ def _prepare_send(
     num_inputs = len(info["inputs"])
     num_outputs = len(info["outputs"])
 
+    # Get info from psbt
+    psbtinfo = info
+    tx = info["tx"]
+    outs = tx["vout"]
+    total_in_amt = 0.0
+    total_out_amt = 0.0
+    change = 0.0
+
+    # Add up total input amount
+    for i in psbtinfo["inputs"]:
+        # TODO does this mean we only support segwit transactions?
+        wit = i["witness_utxo"]
+        amt = float(wit["amount"])
+        total_in_amt = total_in_amt + amt
+
+    # Add up total output amount
+    for o in outs:
+        addr = o['scriptPubKey']['addresses'][0]
+        try:
+            addr_info = rpcw.getaddressinfo(addr)
+        except Exception:
+            # TODO handle this
+            raise
+        amt = float(o["value"])
+        total_out_amt = total_out_amt + amt
+        yours = addr_info["ismine"] or addr_info["iswatchonly"]
+        if yours:
+            change = change + amt
+
     fee = result["fee"]
     perc = (fee / Decimal(amount)) * 100
+
+    F.info(f"total output amount: {total_out_amt} BTC")
     F.info(f"{num_inputs} inputs, {num_outputs} outputs")
-    F.info(f"fee: {result['fee']} BTC ({perc:.2f}% of amount)")
+    F.info(f"network fee: {result['fee']} BTC ({perc:.2f}% of amount)")
+    F.info(f"change back: {change} BTC")
+    F.info("outputs:")
+
+    # Display outputs
+    for o in outs:
+        addr = o['scriptPubKey']['addresses'][0]
+        try:
+            addr_info = rpcw.getaddressinfo(addr)
+        except Exception:
+            # TODO handle this
+            raise
+        display_amt = bold(green(f"{o['value']} BTC"))
+        yours = addr_info["ismine"] or addr_info["iswatchonly"]
+        yours_str = "  (your address)" if yours else ""
+        F.blank(f" -> {bold(addr)}  ({display_amt}){yours_str}")
+
+    F.p()
     F.done(f"wrote PSBT to {filename} - sign with coldcard")
 
     return filename

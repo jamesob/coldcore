@@ -458,7 +458,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     info("great - now let's test your ability to send")
     info(
-        "we're going to send 95% of the value of the last UTXO over "
+        "we're going to send 90% of the value of the last UTXO over "
         "to a new address:"
     )
     sendtoaddr = rpcw.getnewaddress()
@@ -468,7 +468,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     # Send 90% of the value over.
     # TODO this is only for testing and is potentially dangerous
-    send_amt = str((got_utxo.amount * 9) / 10)
+    send_amt = str(round(((got_utxo.amount * 9) / 10), 8))
     prepared_tx = controller.prepare_send(
         config,
         rpcw,
