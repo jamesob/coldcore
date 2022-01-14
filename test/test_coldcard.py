@@ -1,6 +1,6 @@
 import io
 
-from .main import CCWallet, WpkhDescriptor
+from coldcore import CCWallet, WpkhDescriptor
 
 
 def test_parse_public():
@@ -29,6 +29,7 @@ def test_parse_public():
                 is_change=True,
             ),
         ],
+        "name": "coldcard-3d88d0cf",
         "earliest_block": None,
     }
 
@@ -77,6 +78,7 @@ def test_parse_public():
         ],
         "earliest_block": None,
         "bitcoind_json_url": None,
+        "name": "coldcard-f0ccde95",
     }
 
 

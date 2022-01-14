@@ -95,6 +95,13 @@ by doing a few test transactions in testnet.
       set `coldcard --rpc <url>` if desired.
 
 
+### Development
+
+Run tests and linting locally with `make test` and `make lint`. It's advisable to do
+this before filing a PR, otherwise CI will likely fail due to [`black` formatting
+requirements](https://github.com/psf/black).
+
+
 ## Design
 
 ### Zero install process
@@ -143,37 +150,7 @@ supported, but I'm happy to add others that fit the criteria of
 
 ### Auditing
 
-The final script, `coldcore`, is dumbly compiled from the contents of `src/coldcore/`
-for convenience during development (per `./bin/compile`).
-
-If you want to read through, I recommend starting with the `src/coldcore` tree.
-
-```
-.
-├── bin
-│   ├── compile                    # generates final `coldcore` script
-│   └── sign_release
-├── coldcore
-├── sigs                           # signatures for verification
-│   └── coldcore-0.1.0-alpha.asc
-└── src
-    ├── coldcore
-    │   ├── crypto.py              # a few basic cryptographic utilities
-    │   ├── __init__.py
-    │   ├── main.py                # most logic is here; wallet ops, CLI, models
-    │   ├── test_coldcard.py
-    │   ├── test_crypto.py
-    │   ├── thirdparty
-    │   │   ├── bitcoin_rpc.py     # taken from python-bitcoinlib
-    │   │   ├── clii.py            # taken from jamesob/clii
-    │   │   ├── __init__.py
-    │   │   └── py.typed
-    │   └── ui.py                  # presentation logic, curses
-    ├── requirements-dev.txt
-    └── setup.py                   # for development use only
-```
-
-
+All source is contained in `coldcore`.
 
 ## Status
 

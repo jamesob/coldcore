@@ -1,0 +1,4 @@
+mypy
+pytest
+flake8
+black==21.12b0
