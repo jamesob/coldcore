@@ -1,4 +1,4 @@
-from . import crypto
+from coldcore import xpub_to_fp
 
 
 def test_xpub_to_fp():
@@ -23,4 +23,4 @@ def test_xpub_to_fp():
     ]
 
     for (xpub, fp) in pairs:
-        assert crypto.xpub_to_fp(xpub) == fp
+        assert xpub_to_fp(xpub) == fp

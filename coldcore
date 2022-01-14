@@ -21,72 +21,51 @@
 
 """
 
+import argparse
 import logging
 import re
 import typing as t
 import sys
 import base64
 import datetime
+import inspect
+import functools
 import subprocess
+import hashlib
 import time
+import io
 import textwrap
 import json
-import io
-import os
 import platform
-from pathlib import Path
-from typing import Optional as Op
-from dataclasses import dataclass, field
-from configparser import ConfigParser
-from decimal import Decimal
-
-# fmt: off
-# We have to keep these imports to one line because of how ./bin/compile works.
-
-
-# --- inlined from src/coldcore/thirdparty/clii.py -----------------------------
-# ------------------------------------------------------------------------------
-
-"""
-clii
-
-The easiest damned argparse wrapper there ever was.
-
-
-Copyright 2020 James O'Beirne
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-"""
-import sys
-import argparse
-import functools
-import inspect
-import typing as t
+import urllib.parse as urlparse
+import socket
+import http.client
 import os
-import logging
+import http.client as httplib
+import curses
+import contextlib
+import traceback
+import threading
+import decimal
+import string
+from dataclasses import dataclass, field
+from pathlib import Path
+from collections import namedtuple
+from curses.textpad import Textbox
+
 from textwrap import dedent
+from decimal import Decimal
+from typing import IO, Optional as Op
+from configparser import ConfigParser
 
 
-logger = logging.getLogger("clii")
+# --- command line parsing ------------------------------------------------------------
+# -------------------------------------------------------------------------------------
+
+clii_logger = logging.getLogger("clii")
 if os.environ.get("CLII_DEBUG"):
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(logging.StreamHandler())
+    clii_logger.setLevel(logging.DEBUG)
+    clii_logger.addHandler(logging.StreamHandler())
 
 
 class Arg:
@@ -176,7 +155,7 @@ class Arg:
             kwargs["action"] = "store_false" if self.default else "store_true"
             kwargs.pop("type", "")
 
-        logger.debug(f"Attaching argument: {self.names} -> {kwargs}")
+        clii_logger.debug(f"Attaching argument: {self.names} -> {kwargs}")
         parser.add_argument(*self.names, **kwargs)  # type: ignore
 
     def update_name(self, name: str):
@@ -269,7 +248,7 @@ class App:
             fnc.__name__.replace("_", "-"),
             description="\n".join(doclines),
         )
-        logger.debug("Added subparser: %s", sub)
+        clii_logger.debug("Added subparser: %s", sub)
 
         for arg in Arg.from_func(fnc):
             arg.add_to_parser(sub)
@@ -286,7 +265,7 @@ class App:
     def parse_for_run(self) -> t.Tuple[t.Callable, t.Tuple[t.List, t.Dict]]:
         self.args = self.parser.parse_args()
         args = vars(self.args)
-        logger.debug("Parsed args: %s", args)
+        clii_logger.debug("Parsed args: %s", args)
         fnc = args.pop("func", None)
 
         if not fnc:
@@ -318,15 +297,8 @@ class App:
         return fnc(*func_args, **func_kwargs)
 
 
-# --- end inlined from src/coldcore/thirdparty/clii.py -------------------------
-# ------------------------------------------------------------------------------
-
-
-
-
-
-# --- inlined from src/coldcore/thirdparty/bitcoin_rpc.py ----------------------
-# ------------------------------------------------------------------------------
+# --- Bitcoin RPC ---------------------------------------------------------------------
+# -------------------------------------------------------------------------------------
 
 # Copyright (C) 2007 Jan-Klaas Kollhof
 # Copyright (C) 2011-2018 The python-bitcoinlib developers
@@ -341,28 +313,11 @@ class App:
 # propagated, or distributed except according to the terms contained in the
 # LICENSE file.
 
-import logging
-import os
-import base64
-import http.client as httplib
-import json
-import platform
-import urllib.parse as urlparse
-import socket
-import re
-import time
-import http.client
-import typing as t
-from typing import IO, Optional as Op
-from decimal import Decimal
-
 DEFAULT_USER_AGENT = "AuthServiceProxy/0.1"
 DEFAULT_HTTP_TIMEOUT = 30
 
-
-logger = logging.getLogger("rpc")
-logger.setLevel(logging.DEBUG)
-# logger.addHandler(logging.StreamHandler())
+rpc_logger = logging.getLogger("rpc")
+rpc_logger.setLevel(logging.DEBUG)
 
 
 class JSONRPCError(Exception):
@@ -441,13 +396,13 @@ class BitcoinRPC(object):
                 authpair = self._get_bitcoind_cookie_authpair(
                     conf, btc_conf_file, net_name
                 )
-                logger.debug("pulling authpair from cookie despite intaking URL")
+                rpc_logger.debug("pulling authpair from cookie despite intaking URL")
 
         if wallet_name:
             service_url = service_url.rstrip("/")
             service_url += f"/wallet/{wallet_name}"
 
-        logger.info(f"Connecting to bitcoind: {service_url}")
+        rpc_logger.info(f"Connecting to bitcoind: {service_url}")
         self.url = service_url
 
         # Credential redacted
@@ -455,7 +410,7 @@ class BitcoinRPC(object):
         self._parsed_url = urlparse.urlparse(service_url)
         self.host = self._parsed_url.hostname
 
-        logger.info(f"Initializing RPC client at {self.public_url}")
+        rpc_logger.info(f"Initializing RPC client at {self.public_url}")
         # XXX keep for debugging, but don't ship:
         # logger.info(f"[REMOVE THIS] USING AUTHPAIR {authpair}")
 
@@ -500,12 +455,12 @@ class BitcoinRPC(object):
         try:
             with open(cookie_file, "r") as fd:
                 authpair = fd.read()
-                logger.debug("read authpair from cookie")
+                rpc_logger.debug("read authpair from cookie")
         except (IOError, FileNotFoundError) as err:
-            logger.debug("couldn't read authpair from cookie", exc_info=True)
+            rpc_logger.debug("couldn't read authpair from cookie", exc_info=True)
             if "rpcpassword" in conf:
                 authpair = "%s:%s" % (conf["rpcuser"], conf["rpcpassword"])
-                logger.debug("read authpair from conf")
+                rpc_logger.debug("read authpair from conf")
             else:
                 raise ValueError(
                     "Cookie file unusable (%s) and rpcpassword not specified "
@@ -539,7 +494,7 @@ class BitcoinRPC(object):
             }
         )
 
-        logger.debug(f"[{self.public_url}] calling %s%s", service_name, args)
+        rpc_logger.debug(f"[{self.public_url}] calling %s%s", service_name, args)
 
         headers = {
             "Host": self._parsed_url.hostname,
@@ -553,12 +508,13 @@ class BitcoinRPC(object):
         path = self._parsed_url.path
         tries = 5
         backoff = 0.3
+        conn = None
         while tries:
             try:
                 conn = self._getconn(timeout=kwargs['timeout'])
                 conn.request("POST", path, postdata, headers)
             except (BlockingIOError, http.client.CannotSendRequest, socket.gaierror):
-                logger.exception(
+                rpc_logger.exception(
                     f"hit request error: {path}, {postdata}, {self._parsed_url}"
                 )
                 tries -= 1
@@ -569,6 +525,7 @@ class BitcoinRPC(object):
             else:
                 break
 
+        assert conn
         response = self._get_response(conn)
         err = response.get("error")
         if err is not None:
@@ -595,7 +552,7 @@ class BitcoinRPC(object):
         rdata = http_response.read().decode("utf8")
         try:
             loaded = json.loads(rdata, parse_float=Decimal)
-            logger.debug(f"[{self.public_url}] -> {loaded}")
+            rpc_logger.debug(f"[{self.public_url}] -> {loaded}")
             return loaded
         except Exception:
             raise JSONRPCError(
@@ -631,22 +588,11 @@ class BitcoinRPC(object):
         return _call_wrapper
 
 
-# --- end inlined from src/coldcore/thirdparty/bitcoin_rpc.py ------------------
-# ------------------------------------------------------------------------------
-
-
-
-
-
-# --- inlined from src/coldcore/crypto.py --------------------------------------
-# ------------------------------------------------------------------------------
-
-"""
-Basic encoding/cryptographic operations, mostly relating to xpub parsing.
-"""
-import hashlib
-
-# Much of this file was derived from code in buidl-python
+# --- crypto --------------------------------------------------------------------------
+# Basic encoding/cryptographic operations, mostly relating to xpub parsing.
+# -------------------------------------------------------------------------------------
+#
+# Much of this section was derived from code in buidl-python
 # (https://github.com/buidl-bitcoin/buidl-python).
 
 
@@ -710,40 +656,10 @@ def hash256(s):
     return hashlib.sha256(hashlib.sha256(s).digest()).digest()
 
 
-# --- end inlined from src/coldcore/crypto.py ----------------------------------
-# ------------------------------------------------------------------------------
+# --- Curses UI -----------------------------------------------------------------------
+# -------------------------------------------------------------------------------------
 
-
-
-
-
-# --- inlined from src/coldcore/ui.py ------------------------------------------
-# ------------------------------------------------------------------------------
-
-import curses
-import contextlib
-import typing as t
-import logging
-import textwrap
-import time
-import subprocess
-import sys
-import traceback
-import socket
-import threading
-import platform
-import base64
-import datetime
-import os
-import json
-import decimal
-import string
-from dataclasses import dataclass
-from pathlib import Path
-from collections import namedtuple
-from curses.textpad import Textbox
-
-logger = logging.getLogger("ui")
+ui_logger = logging.getLogger("ui")
 
 
 class DecimalEncoder(json.JSONEncoder):
@@ -899,11 +815,10 @@ F = OutputFormatter()
 
 
 class Scene:
-    def __init__(self, scr, conf, wconfs, controller):
+    def __init__(self, scr, conf, wconfs):
         self.scr = scr
         self.config = conf
         self.wallet_configs = wconfs
-        self.controller = controller
 
     def draw(self, k: int) -> t.Tuple[int, Action]:
         pass
@@ -914,7 +829,7 @@ class MenuItem(namedtuple("MenuItem", "idx,title,action")):
         return (self.idx, self.title, mchoice == self)
 
 
-def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
+def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     curses.endwin()
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -947,7 +862,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     p(title)
 
     blank("searching for Bitcoin Core...")
-    rpc = controller.discover_rpc(config)
+    rpc = discover_rpc(config)
     if not rpc:
         warn("couldn't detect Bitcoin Core - make sure it's running locally, or")
         warn("use `coldcore --rpc <url>`")
@@ -966,20 +881,21 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
         delay()
         pre = "you can encrypt your config file with"
 
-        if controller.has_gpg():
+        if _get_gpg_command():
             prompt = "do you want to use GPG to encrypt your coldcore config? [y/N] "
             if inp(prompt) == "y":
                 use_gpg = True
 
-        if controller.has_pass():
+        # TODO not Windows compatible
+        if _get_stdout("which pass")[0] == 0:
             info(f"{pre} pass by prefixing your path with 'pass:'")
             p()
             delay()
 
-        defaultpath = controller.suggested_config_path(use_gpg)
+        defaultpath = get_path_for_new_config(use_gpg)
         where = inp(f"where should I store your config? [{defaultpath}] ")
         where = where or defaultpath
-        config = controller.create_config(where, rpc.url)
+        config = create_config(where, rpc.url)
     else:
         if config.loaded_from.endswith(".gpg"):
             use_gpg = True
@@ -1044,7 +960,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
             pubfile = pubfilepath
 
     try:
-        wallet = controller.parse_cc_public(pubfile.read_text(), rpc)
+        wallet = CCWallet.from_io(io.StringIO(pubfile.read_text()), rpc)
     except Exception as e:
         p()
         if "key 'tpub" in str(e):
@@ -1087,7 +1003,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     p()
 
     section("wallet setup in Core")
-    controller.rpc_wallet_create(rpc, wallet)
+    rpc_wallet_create(rpc, wallet)
     done(f"created wallet {yellow(wallet.name)} in Core as watch-only")
 
     rpcw = config.rpc(wallet)
@@ -1165,7 +1081,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     got_utxo = None
     while not got_utxo:
         spin("waiting for transaction")
-        utxos = controller.get_utxos(rpcw)
+        utxos = get_utxos(rpcw)
         matching = [u for u in utxos.values() if u.address == receive_addr1]
         if matching:
             got_utxo = matching[0]
@@ -1191,8 +1107,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     # Send 90% of the value over.
     # TODO this is only for testing and is potentially dangerous
     send_amt = str(round(((got_utxo.amount * 9) / 10), 8))
-    prepared_tx = controller.prepare_send(
-        config,
+    prepared_tx = _prepare_send(
         rpcw,
         sendtoaddr,
         send_amt,
@@ -1230,12 +1145,12 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
 
     # TODO clean this up
     psbt_hex = base64.b64encode(Path(signed_filename).read_bytes()).decode()
-    txhex = controller.psbt_to_tx_hex(rpcw, Path(signed_filename))
+    txhex = _psbt_to_tx_hex(rpcw, Path(signed_filename))
     p()
     p()
     done("cool! got the signed PSBT")
 
-    if not controller.confirm_broadcast(rpcw, txhex, psbt_hex):
+    if not confirm_broadcast(rpcw, txhex, psbt_hex):
         warn("aborting - doublespend the inputs immediately")
         return finish(config, wallet)
 
@@ -1246,7 +1161,7 @@ def run_setup(config, controller) -> t.Tuple[t.Any, t.Any]:
     inmempool = False
     while not inmempool:
         spin("waiting to see the transaction in the mempool")
-        utxos = controller.get_utxos(rpcw)
+        utxos = get_utxos(rpcw)
         matching = [u for u in utxos.values() if u.address == sendtoaddr]
         if matching:
             got_utxo = matching[0]
@@ -1283,14 +1198,14 @@ def _run_scantxoutset(rpcw, args, result):
     try:
         result["result"] = rpcw.scantxoutset(*args)
     except socket.timeout:
-        logger.debug("socket timed out during txoutsetscan (this is expected)")
+        ui_logger.debug("socket timed out during txoutsetscan (this is expected)")
 
 
 def _run_rescan(rpcw, begin_height: int):
     try:
         rpcw.rescanblockchain(begin_height)
     except socket.timeout:
-        logger.debug("socket timed out during rescan (this is expected)")
+        ui_logger.debug("socket timed out during rescan (this is expected)")
 
 
 # Curses is weird and ENTER isn't always ENTER.
@@ -1439,7 +1354,7 @@ class DashboardScene(Scene):
 
         t1 = threading.Thread(
             target=_get_utxo_lines,
-            args=(wrpc, self.controller, self.utxos),
+            args=(wrpc, self.utxos),
         )
         t1.start()
         self.threads.append(t1)
@@ -1463,11 +1378,9 @@ class DashboardScene(Scene):
         try:
             return self._draw(k)
         except Exception:
-            logger.exception("Dashboard curses barfed")
+            ui_logger.exception("Dashboard curses barfed")
             self.stop_threads()
             raise
-
-        return (ord("q"), GoHome)
 
     def _draw(self, k: int) -> t.Tuple[int, Action]:
         scr = self.scr
@@ -1505,7 +1418,7 @@ class DashboardScene(Scene):
                     rpcw = self.config.rpc(wall)
                     self.new_addrs.append(rpcw.getnewaddress())
                 except Exception:
-                    logger.info("call to getnewadddress failed", exc_info=True)
+                    ui_logger.info("call to getnewadddress failed", exc_info=True)
 
         utxo_addrs = {u.address for u in self.utxos.values()}
         # Strip out used addresses.
@@ -1658,7 +1571,7 @@ class DashboardScene(Scene):
                     rpcw = self.config.rpc(wall)
                     rpcw.setlabel(u.address, new_label)
                 except Exception:
-                    logger.info("failed to set label", exc_info=True)
+                    ui_logger.info("failed to set label", exc_info=True)
                     self.flash_msg = "failed to set label"
                 else:
                     self.flash_msg = f"set label to '{new_label}'"
@@ -1761,7 +1674,7 @@ def to_clipboard(s: str) -> bool:
 
     if plat == "Linux":
         if sh("which xclip", capture_output=True) != 0:
-            logger.info("xclip not found, cannot copy to clipboard")
+            ui_logger.info("xclip not found, cannot copy to clipboard")
             return False
         cmd = "xclip -selection clipboard"
         sh(f"printf '{s}' | {cmd}")
@@ -1793,15 +1706,16 @@ blocks_lock = threading.Lock()
 
 def _get_new_blocks(rpc, blocks):
     last_saw = None
+    saw = None
 
     while True:
         try:
             saw = rpc.getbestblockhash()
         except Exception:
-            logger.info("getbestblockhash call failed", exc_info=True)
+            ui_logger.info("getbestblockhash call failed", exc_info=True)
             rpc_conn_lost.set()
 
-        if saw != last_saw:
+        if saw and saw != last_saw:
             stats = rpc.getblockstats(saw)
             with blocks_lock:
                 blocks.append(
@@ -1823,19 +1737,22 @@ def _get_new_blocks(rpc, blocks):
             return
 
 
-def _get_utxo_lines(rpcw, controller, utxos):
+def _get_utxo_lines(rpcw, utxos):
     """
     Poll constantly for new UTXOs.
     """
+    new_utxos = None
+
     while True:
         try:
-            new_utxos = controller.get_utxos(rpcw)
+            new_utxos = get_utxos(rpcw)
         except Exception:
-            logger.info("listunspents call failed", exc_info=True)
+            ui_logger.info("listunspents call failed", exc_info=True)
 
-        with utxos_lock:
-            utxos.clear()
-            utxos.update(new_utxos)
+        if new_utxos:
+            with utxos_lock:
+                utxos.clear()
+                utxos.update(new_utxos)
 
         time.sleep(1)
 
@@ -1856,7 +1773,7 @@ class _TermOpts:
 TermOpts = _TermOpts()
 
 
-def draw_menu(scr, config, wallet_configs, controller, action=None):
+def draw_menu(scr, config, wallet_configs, action=None):
     wallet_configs = wallet_configs or []
     # Clear and refresh the screen for a blank canvas
     scr.clear()
@@ -1875,8 +1792,8 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
     if curses.COLORS >= 256:
         TermOpts.has_256color = True
 
-    home = HomeScene(scr, config, wallet_configs, controller)
-    dashboard = DashboardScene(scr, config, wallet_configs, controller)
+    home = HomeScene(scr, config, wallet_configs)
+    dashboard = DashboardScene(scr, config, wallet_configs)
 
     action = action or GoHome
     k = 0
@@ -1912,12 +1829,12 @@ def draw_menu(scr, config, wallet_configs, controller, action=None):
             if action == GoHome:
                 (k, action) = home.draw(k)
             elif action == GoSetup:
-                config, wallet = run_setup(config, controller)
+                config, wallet = run_setup(config)
                 # Reinitialize the scenes
                 if config and wallet:
                     wallet_configs.append(wallet)
-                    home = HomeScene(scr, config, wallet_configs, controller)
-                    dashboard = DashboardScene(scr, config, wallet_configs, controller)
+                    home = HomeScene(scr, config, wallet_configs)
+                    dashboard = DashboardScene(scr, config, wallet_configs)
                 k = -1
                 action = GoHome
             elif action == GoDashboard:
@@ -1947,10 +1864,10 @@ def attrs(scr, *attrs):
         scr.attroff(a)
 
 
-def start_ui(config, wallet_configs, controller, action=None):
+def start_ui(config, wallet_configs, action=None):
     formatter = OutputFormatter()
     try:
-        curses.wrapper(draw_menu, config, wallet_configs, controller, action)
+        curses.wrapper(draw_menu, config, wallet_configs, action)
         os.system("cls" if os.name == "nt" else "clear")
     except curses.error:
         print()
@@ -1958,7 +1875,7 @@ def start_ui(config, wallet_configs, controller, action=None):
         print()
         sys.exit(1)
     except socket.timeout:
-        logger.exception("RPC connection timed out")
+        ui_logger.exception("RPC connection timed out")
         print()
         formatter.warn("Unable to connect to Bitcoin Core RPC - are you sure ")
         formatter.warn("it is running and the RPC URL you gave is correct?")
@@ -1967,12 +1884,8 @@ def start_ui(config, wallet_configs, controller, action=None):
         sys.exit(1)
 
 
-# --- end inlined from src/coldcore/ui.py --------------------------------------
-# ------------------------------------------------------------------------------
-
-
-
-# fmt: on
+# --- main/CLI ------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------
 
 __VERSION__ = "0.2.0-beta"
 
@@ -2059,7 +1972,7 @@ def decodepsbt(fname: str, format: str = "json"):
     Args:
         format: either json or hex
     """
-    (config, (wall, *_)) = _get_config_required()
+    (config, *_) = _get_config_required()
     rpc = config.rpc()
     b = Path(fname).read_bytes()
     hexval = base64.b64encode(b).decode()
@@ -2076,7 +1989,7 @@ def setup():
     one doesn't already exist) and populates a watch-only wallet in Core.
     """
     config, walls = _get_config(require_wallets=False)
-    start_ui(config, walls, WizardController(), GoSetup)
+    start_ui(config, walls, GoSetup)
 
 
 @cli.cmd
@@ -2162,7 +2075,7 @@ def prepare_send(to_address: str, amount: str, spend_from: str = ""):
     rpcw = config.rpc(wall)
     spend_from_list = spend_from.split(",") if spend_from else None
 
-    return _prepare_send(config, rpcw, to_address, amount, spend_from_list)
+    return _prepare_send(rpcw, to_address, amount, spend_from_list)
 
 
 @cli.cmd
@@ -2209,7 +2122,7 @@ def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
 @cli.cmd
 def ui():
     config, walls = _get_config(require_wallets=False)
-    start_ui(config, walls, WizardController())
+    start_ui(config, walls)
 
 
 @cli.main
@@ -2529,43 +2442,6 @@ class UTXO:
         return (self.txid, self.vout)
 
 
-class WizardController:
-    """Used to proxy logic into the terminal UI."""
-
-    def create_config(self, p: str, url: str) -> Op["GlobalConfig"]:
-        return create_config(p, url)
-
-    def parse_cc_public(self, contents: str, rpc: BitcoinRPC) -> CCWallet:
-        return CCWallet.from_io(io.StringIO(contents), rpc)
-
-    def rpc_wallet_create(self, *args, **kwargs):
-        return rpc_wallet_create(*args, **kwargs)
-
-    def discover_rpc(self, *args, **kwargs) -> Op[BitcoinRPC]:
-        return discover_rpc(*args, **kwargs)
-
-    def has_gpg(self) -> bool:
-        return bool(_get_gpg_command())
-
-    def has_pass(self) -> bool:
-        return _get_stdout("which pass")[0] == 0
-
-    def suggested_config_path(self, use_gpg: bool = False) -> str:
-        return get_path_for_new_config(use_gpg)
-
-    def get_utxos(self, rpcw):
-        return get_utxos(rpcw)
-
-    def prepare_send(self, *args, **kwargs) -> str:
-        return _prepare_send(*args, **kwargs)
-
-    def psbt_to_tx_hex(self, *args, **kwargs) -> str:
-        return _psbt_to_tx_hex(*args, **kwargs)
-
-    def confirm_broadcast(self, *args, **kwargs) -> bool:
-        return confirm_broadcast(*args, **kwargs)
-
-
 @dataclass
 class GlobalConfig:
     """Coldcore-specific configuration."""
@@ -2576,7 +2452,6 @@ class GlobalConfig:
     default_wallet: Op[str] = None
     stdout: t.IO = sys.stdout
     stderr: t.IO = sys.stderr
-    wizard_controller: WizardController = WizardController()
 
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
         wall_rpc = wallet.bitcoind_json_url if wallet else None
@@ -2786,7 +2661,7 @@ def _get_rpc_inner(
 
 
 def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
-    """Return (returncode, stdout as bytes)."""
+    """Return (returncode, stdout)."""
     kwargs["shell"] = True
     kwargs["capture_output"] = True
     result = subprocess.run(*args, **kwargs)
@@ -2818,12 +2693,11 @@ def get_utxos(rpcw: BitcoinRPC) -> t.Dict[UtxoId, "UTXO"]:
 
 
 def _prepare_send(
-    config: GlobalConfig,
     rpcw: BitcoinRPC,
     to_address: str,
     amount: str,
     spend_from: Op[t.List[str]],
-):
+) -> str:
     vins = []
 
     if spend_from:
@@ -2851,7 +2725,7 @@ def _prepare_send(
         # error code: -5 indicates bad address; handle that.
         if e.error.get("code") == -5:  # type: ignore
             F.warn(f"Bad address specified: {e}")
-            return False
+            return ""
         raise
 
     nowstr = datetime.datetime.now().strftime("%Y%m%d-%H%M")
@@ -2963,6 +2837,8 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
             addrs = ",".join(spk["addresses"])
         elif 'address' in spk:
             addrs = spk["address"]
+        else:
+            raise RuntimeError(f"unexpected decoderawtransaction format:\n{info}")
 
         outs.append((addrs, out["value"]))
 
@@ -3008,7 +2884,7 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
 class Pass:
     """Access to pass, the password store."""
 
-    def write(cls, path: str, content: str) -> bool:
+    def write(self, path: str, content: str) -> bool:
         """Return True if write successful."""
         # TODO maybe detect whether or not we're overwriting and warn
         F.alert(f"Requesting to write to pass: {path}")
