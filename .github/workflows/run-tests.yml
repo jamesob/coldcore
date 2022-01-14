@@ -24,26 +24,22 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements-dev.txt
+        cp coldcore coldcore.py
+        echo "PYTHONPATH=$(pwd)" >> $GITHUB_ENV
 
     - name: black
-      run: black --check
+      run: black --check coldcore
 
     - name: flake8
       run: |
-        flake8 src --count --show-source --statistics --exclude 'test_*'
+        flake8 coldcore --count --show-source --statistics
         # When linting the tests, ignore long line errors
-        flake8 src --count --show-source --statistics --ignore E501
+        flake8 test/ --count --show-source --statistics --ignore E501
 
     - name: pytest
       run: |
-        pytest -vv src
+        pytest -vv test/
 
     - name: mypy
       run: |
-        mypy src/coldcore
-
-    - name: check compiled script
-      run: |
-          python ./bin/compile
-          git diff --exit-code
-          ./coldcore --help
+        mypy coldcore
