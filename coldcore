@@ -10,10 +10,8 @@
 
 # TODO
 
-- [ ] add wallet name
 - [ ] add version birthday to new config
 - [ ] allow manual coin selection when sending
-- [ ] address labeling
 - [ ] implement scrolling in the curses balance panel
 - [ ] implement --json, --csv
 - [ ] implement command-on-monitor
@@ -331,6 +329,10 @@ class JSONRPCError(Exception):
             "msg: %r  code: %r" % (rpc_error["message"], rpc_error["code"])
         )
         self.error = rpc_error
+
+    @property
+    def code(self) -> int:
+        return int(self.error["code"])
 
 
 class BitcoinRPC(object):
@@ -1004,65 +1006,7 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     done(f"wrote config to {config.loaded_from}")
     p()
 
-    section("wallet setup in Core")
-    rpc_wallet_create(rpc, wallet)
-    done(f"created wallet {yellow(wallet.name)} in Core as watch-only")
-
-    rpcw = config.rpc(wallet)
-    rpcw.importmulti(*wallet.importmulti_args())
-    done("imported descriptors 0/* and 1/* (change)")
-
-    scan_result = {}  # type: ignore
-    scan_thread = threading.Thread(
-        target=_run_scantxoutset,
-        args=(config.rpc(wallet), wallet.scantxoutset_args(), scan_result),
-    )
-    scan_thread.start()
-
-    p()
-    section("scanning the chain for balance and history")
-    while scan_thread.is_alive():
-        spin("scanning the UTXO set for your balance (few minutes) ")
-        time.sleep(0.2)
-
-    p()
-    done("scan of UTXO set complete!")
-
-    # TODO this will fail if we timed out
-    unspents = scan_result["result"]["unspents"]
-    bal = sum([i["amount"] for i in unspents])
-    bal_str = yellow(bold(f"{bal} BTC"))
-    bal_count = yellow(bold(f"{len(unspents)} UTXOs"))
-    blank(f"found an existing balance of {yellow(bal_str)} across {yellow(bal_count)}")
-
-    if unspents:
-        rescan_begin_height = min([i["height"] for i in unspents])
-        p()
-        blank(
-            f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
-            f"(minutes to hours)"
-        )
-        blank("  this allows us to find transactions associated with your coins\n")
-        rescan_thread = threading.Thread(
-            target=_run_rescan,
-            args=(config.rpc(wallet), rescan_begin_height),
-            daemon=True,
-        )
-        rescan_thread.start()
-
-        time.sleep(2)
-
-    scan_info = rpcw.getwalletinfo()["scanning"]
-    while scan_info:
-        spin(f"scan progress: {scan_info['progress'] * 100:.2f}%   ")
-        time.sleep(0.5)
-        scan_info = rpcw.getwalletinfo()["scanning"]
-
-    name = yellow(wallet.name)
-    p()
-    done(f"scan complete. wallet {name} ready to use.")
-    info(f"Hint: check out your UTXOs with `coldcore -w {wallet.name} balance`")
-
+    rpcw = init_wallet_in_core(config, rpc, wallet)
     p()
 
     got = inp("do you want to perform some test transactions? [Y/n] ").lower()
@@ -2124,7 +2068,97 @@ def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
 @cli.cmd
 def ui():
     config, walls = _get_config(require_wallets=False)
-    start_ui(config, walls)
+    try:
+        start_ui(config, walls)
+    except JSONRPCError as e:
+        if e.code == -18:
+            print()
+            print("Wallet not found - are you using a new instance of bitcoind?")
+            print("If so, reinitialize with `coldcore reinit-wallet`")
+            sys.exit(1)
+        else:
+            raise
+
+
+@cli.cmd
+def reinit_wallet():
+    """
+    Reinitialize the wallet on an instance of bitcoind which hasn't seen it before.
+    """
+    config, walls = _get_config(require_wallets=False)
+    assert walls
+    rpc = discover_rpc(config)
+    assert rpc
+    init_wallet_in_core(config, rpc, walls[0])
+
+
+def init_wallet_in_core(config, rpc, wallet) -> BitcoinRPC:
+    """
+    Initialize a wallet in core useing createwallet and scan for its balance and
+    history.
+    """
+    F.section("wallet setup in Core")
+    rpc_wallet_create(rpc, wallet)
+    F.done(f"created wallet {yellow(wallet.name)} in Core as watch-only")
+
+    rpcw = config.rpc(wallet)
+    rpcw.importmulti(*wallet.importmulti_args())
+    F.done("imported descriptors 0/* and 1/* (change)")
+
+    scan_result = {}  # type: ignore
+    scan_thread = threading.Thread(
+        target=_run_scantxoutset,
+        args=(config.rpc(wallet), wallet.scantxoutset_args(), scan_result),
+    )
+    scan_thread.start()
+
+    print()
+    F.section("scanning the chain for balance and history")
+    while scan_thread.is_alive():
+        F.spin("scanning the UTXO set for your balance (few minutes) ")
+        time.sleep(0.2)
+
+    print()
+    F.done("scan of UTXO set complete!")
+
+    # TODO this will fail if we timed out
+    unspents = scan_result["result"]["unspents"]
+    bal = sum([i["amount"] for i in unspents])
+    bal_str = yellow(bold(f"{bal} BTC"))
+    bal_count = yellow(bold(f"{len(unspents)} UTXOs"))
+    F.blank(
+        f"found an existing balance of {yellow(bal_str)} across {yellow(bal_count)}"
+    )
+
+    if unspents:
+        rescan_begin_height = min([i["height"] for i in unspents])
+        print()
+        F.blank(
+            f"beginning chain rescan from height {bold(str(rescan_begin_height))} "
+            f"(minutes to hours)"
+        )
+        F.blank("  this allows us to find transactions associated with your coins\n")
+        rescan_thread = threading.Thread(
+            target=_run_rescan,
+            args=(config.rpc(wallet), rescan_begin_height),
+            daemon=True,
+        )
+        rescan_thread.start()
+
+        time.sleep(2)
+
+    scan_info = rpcw.getwalletinfo()["scanning"]
+    while scan_info:
+        F.spin(f"scan progress: {scan_info['progress'] * 100:.2f}%   ")
+        time.sleep(0.5)
+        scan_info = rpcw.getwalletinfo()["scanning"]
+
+    name = yellow(wallet.name)
+    print()
+    F.done(f"scan complete. wallet {name} ready to use.")
+    F.info(f"Hint: check out your UTXOs with `coldcore -w {wallet.name} balance`")
+
+    return rpcw
 
 
 @cli.main
@@ -2601,7 +2635,8 @@ def discover_rpc(
 def _is_already_loaded_err(e: JSONRPCError) -> bool:
     msg = str(e).lower()
     return (
-        ("already loaded" in msg)
+        e.code == -4
+        or ("already loaded" in msg)
         or ("duplicate -wallet filename" in msg)
         or ("database already exists" in msg)
     )
@@ -2661,6 +2696,16 @@ def _get_rpc_inner(
     )
 
 
+def get_node_version(rpc: BitcoinRPC) -> t.Tuple[int, int, int]:
+    """E.g. (22, 99, 0)."""
+    netinfo = rpc.getnetworkinfo()
+    ver = re.match(r'/Satoshi:(\d+)\.(\d+)\.(\d+)/', netinfo['subversion'])
+    assert ver
+    groups = ver.groups()
+    assert len(groups) == 3
+    return tuple(int(i) for i in groups)
+
+
 # --- Wallet/transaction utilities --------------------------------------------
 # -----------------------------------------------------------------------------
 
@@ -2682,8 +2727,24 @@ def _sh(*args, **kwargs) -> subprocess.CompletedProcess:
 
 
 def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
+    node_ver = get_node_version(rpc)
     try:
-        rpc.createwallet(wall.bitcoind_name, True)
+        if node_ver < (22, 99, 0):
+            rpc.createwallet(
+                wall.bitcoind_name, 
+                True,  # disable_private_keys
+            )
+        else:
+            # In 22.99+ (i.e. the 23.0 release), createwallet creates descriptor wallets
+            # by default, which are incompatible with importmulti. 
+            rpc.createwallet(
+                wall.bitcoind_name, 
+                True,  # disable_private_keys
+                True,  # blank
+                None,  # passphrase
+                False,  # avoid_reuse
+                False,  # descriptors
+            )
     except JSONRPCError as e:
         if not _is_already_loaded_err(e):
             # Wallet already exists; ok.
