@@ -344,8 +344,8 @@ requests are certainly accepted.
 
 ### Why did you use Python and not {Rust,Haskell,C++}?
 
-Python simultaneously comes installed nearly universally and is a high-level,
-expressive language. Many people know it. This means that there are more potential
+Python is already installed on most modern systems. It is a high-level,
+expressive language which many people know. This means that there are more potential
 auditors or contributors for this project.
 
 The same code written in another language might be twice as long, and would require
