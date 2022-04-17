@@ -1558,8 +1558,10 @@ class DashboardScene(Scene):
                 _s(self.address_win, 3 + i, 2, addr)
 
             if is_highlighted and k in ENTER_KEYS:
-                to_clipboard(addr)
-                self.flash_msg = f"copied address '{addr}' to clipboard"
+                if to_clipboard(addr):
+                    self.flash_msg = f"copied address '{addr}' to clipboard"
+                else:
+                    self.flash_msg = f"no clipboard program found!"
 
         # --- Paint the chain history window
 
@@ -1622,10 +1624,23 @@ def to_clipboard(s: str) -> bool:
         return subprocess.run(cmd, shell=True, **kwargs).returncode
 
     if plat == "Linux":
-        if sh("which xclip", capture_output=True) != 0:
-            ui_logger.info("xclip not found, cannot copy to clipboard")
+        to_try = [
+            'wl-copy',
+            'xclip',
+        ]
+        clipprog = None
+        for prog in to_try:
+            if sh(f"which {prog}", capture_output=True) == 0:
+                clipprog = prog
+                break
+
+        if not clipprog:
+            ui_logger.info("clipboard program not found")
             return False
-        cmd = "xclip -selection clipboard"
+
+        cmd = clipprog
+        if clipprog == 'xclip':
+            cmd += " -selection clipboard"
         sh(f"printf '{s}' | {cmd}")
     elif plat == "Darwin":
         cmd = "pbcopy"
