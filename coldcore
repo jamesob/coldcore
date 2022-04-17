@@ -2802,7 +2802,7 @@ def _prepare_send(
             if u.address in spend_from:
                 vins.append({"txid": u.txid, "vout": u.vout})
 
-    args = {"includeWatching": True}
+    args: t.Dict[str, t.Any] = {"includeWatching": True}
     if fee_rate is not None:
         args["fee_rate"] = fee_rate
 
@@ -2917,13 +2917,13 @@ def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
     return True
 
 
-def _get_addrs_from_rpc_output(scriptpubkey_dict: dict) -> Op[t.List[str]]:
+def _get_addrs_from_rpc_output(scriptpubkey_dict: dict) -> t.List[str]:
     if "addresses" in scriptpubkey_dict:
         # XXX unsure if this is necessary, but might be for older versions of Core.
         return scriptpubkey_dict["addresses"]
     elif "address" in scriptpubkey_dict:
         return [scriptpubkey_dict["address"]]
-    return None
+    raise ValueError("unexpected scriptPubKey dict")
 
 
 def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
@@ -2933,11 +2933,12 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     outs: t.List[t.Tuple[str, Decimal]] = []
 
     for out in info["vout"]:
-        addrs = _get_addrs_from_rpc_output(out["scriptPubKey"])
-        if not addrs:
+        try:
+            addrs = _get_addrs_from_rpc_output(out["scriptPubKey"])
+        except ValueError:
             raise RuntimeError(f"unexpected decoderawtransaction format:\n{info}")
 
-        outs.append((addrs, out["value"]))
+        outs.append((addrs[0], out["value"]))
 
     F.alert("About to send a transaction:\n")
 
@@ -2953,7 +2954,7 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     F.p()
 
     for o in outs:
-        addr = o[0][0]
+        addr = o[0]
         try:
             addr_info = rpcw.getaddressinfo(addr)
         except Exception:
