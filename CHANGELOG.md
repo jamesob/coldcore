@@ -1,3 +1,8 @@
+## 0.3.1
+
+- Wayland clipboard support (via wl-copy)
+- Allow specification of fee_rate in prepare-send
+- RPC fix for scriptPubKey addresses
 
 ## 0.1.0-alpha
 

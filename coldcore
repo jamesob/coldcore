@@ -57,7 +57,7 @@ from typing import IO, Optional as Op
 from configparser import ConfigParser
 
 
-__VERSION__ = "0.3.0"
+__VERSION__ = "0.3.1"
 
 
 # --- command line parsing ------------------------------------------------------------
