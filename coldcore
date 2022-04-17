@@ -1961,7 +1961,7 @@ def watch():
     rpcw = config.rpc(wall)
 
     utxos = get_utxos(rpcw)
-    F.task(f"Watching wallet {config.wallet_name}")
+    F.task(f"Watching wallet {wall.name}")
 
     while True:
         new_utxos = get_utxos(rpcw)
