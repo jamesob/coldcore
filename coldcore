@@ -1625,8 +1625,8 @@ def to_clipboard(s: str) -> bool:
 
     if plat == "Linux":
         to_try = [
-            'wl-copy',
-            'xclip',
+            "wl-copy",
+            "xclip",
         ]
         clipprog = None
         for prog in to_try:
@@ -1639,7 +1639,7 @@ def to_clipboard(s: str) -> bool:
             return False
 
         cmd = clipprog
-        if clipprog == 'xclip':
+        if clipprog == "xclip":
             cmd += " -selection clipboard"
         sh(f"printf '{s}' | {cmd}")
     elif plat == "Darwin":
@@ -2024,7 +2024,9 @@ def balance(format: str = "plain"):
 
 
 @cli.cmd
-def prepare_send(to_address: str, amount: str, spend_from: str = "", fee_rate: int = None):
+def prepare_send(
+    to_address: str, amount: str, spend_from: str = "", fee_rate: int = None
+):
     """
     Prepare a sending PSBT.
 
@@ -2802,7 +2804,7 @@ def _prepare_send(
 
     args = {"includeWatching": True}
     if fee_rate is not None:
-        args['fee_rate'] = fee_rate
+        args["fee_rate"] = fee_rate
 
     try:
         result = rpcw.walletcreatefundedpsbt(
@@ -2931,7 +2933,7 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     outs: t.List[t.Tuple[str, Decimal]] = []
 
     for out in info["vout"]:
-        addrs = _get_addrs_from_rpc_output(out['scriptPubKey'])
+        addrs = _get_addrs_from_rpc_output(out["scriptPubKey"])
         if not addrs:
             raise RuntimeError(f"unexpected decoderawtransaction format:\n{info}")
 
