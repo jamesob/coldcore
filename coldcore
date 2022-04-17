@@ -1606,7 +1606,7 @@ class DashboardScene(Scene):
 
         # scr.move(self.width, self.height)
 
-        scr.timeout(400)
+        scr.timeout(2000)
         next_k = scr.getch()
         self.loop_count += 1
 
