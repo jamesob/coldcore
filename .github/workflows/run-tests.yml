@@ -34,7 +34,7 @@ jobs:
       run: |
         flake8 coldcore --count --show-source --statistics
         # When linting the tests, ignore long line errors
-        flake8 test/ --count --show-source --statistics
+        flake8 test/ --count --show-source --statistics --extend-ignore E501
 
     - name: pytest
       run: |
