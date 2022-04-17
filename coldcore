@@ -1558,8 +1558,10 @@ class DashboardScene(Scene):
                 _s(self.address_win, 3 + i, 2, addr)
 
             if is_highlighted and k in ENTER_KEYS:
-                to_clipboard(addr)
-                self.flash_msg = f"copied address '{addr}' to clipboard"
+                if to_clipboard(addr):
+                    self.flash_msg = f"copied address '{addr}' to clipboard"
+                else:
+                    self.flash_msg = f"no clipboard program found!"
 
         # --- Paint the chain history window
 
@@ -1604,7 +1606,7 @@ class DashboardScene(Scene):
 
         # scr.move(self.width, self.height)
 
-        scr.timeout(400)
+        scr.timeout(2000)
         next_k = scr.getch()
         self.loop_count += 1
 
@@ -1622,10 +1624,23 @@ def to_clipboard(s: str) -> bool:
         return subprocess.run(cmd, shell=True, **kwargs).returncode
 
     if plat == "Linux":
-        if sh("which xclip", capture_output=True) != 0:
-            ui_logger.info("xclip not found, cannot copy to clipboard")
+        to_try = [
+            "wl-copy",
+            "xclip",
+        ]
+        clipprog = None
+        for prog in to_try:
+            if sh(f"which {prog}", capture_output=True) == 0:
+                clipprog = prog
+                break
+
+        if not clipprog:
+            ui_logger.info("clipboard program not found")
             return False
-        cmd = "xclip -selection clipboard"
+
+        cmd = clipprog
+        if clipprog == "xclip":
+            cmd += " -selection clipboard"
         sh(f"printf '{s}' | {cmd}")
     elif plat == "Darwin":
         cmd = "pbcopy"
@@ -1946,7 +1961,7 @@ def watch():
     rpcw = config.rpc(wall)
 
     utxos = get_utxos(rpcw)
-    F.task(f"Watching wallet {config.wallet_name}")
+    F.task(f"Watching wallet {wall.name}")
 
     while True:
         new_utxos = get_utxos(rpcw)
@@ -2009,7 +2024,9 @@ def balance(format: str = "plain"):
 
 
 @cli.cmd
-def prepare_send(to_address: str, amount: str, spend_from: str = ""):
+def prepare_send(
+    to_address: str, amount: str, spend_from: str = "", fee_rate: int = None
+):
     """
     Prepare a sending PSBT.
 
@@ -2017,12 +2034,13 @@ def prepare_send(to_address: str, amount: str, spend_from: str = ""):
         to_address: which address to send to
         amount: amount to send in BTC
         spend_from: comma-separated addresses to pull unspents from as inputs
+        fee_rate: specified in sats/vB. Otherwise falls back to Core fee estimation.
     """
     (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
     spend_from_list = spend_from.split(",") if spend_from else None
 
-    return _prepare_send(rpcw, to_address, amount, spend_from_list)
+    return _prepare_send(rpcw, to_address, amount, spend_from_list, fee_rate=fee_rate)
 
 
 @cli.cmd
@@ -2764,7 +2782,11 @@ def _prepare_send(
     to_address: str,
     amount: str,
     spend_from: Op[t.List[str]],
+    fee_rate: Op[int] = None,
 ) -> str:
+    """
+    fee_rate: specified in sats/vB
+    """
     vins = []
 
     if spend_from:
@@ -2780,12 +2802,16 @@ def _prepare_send(
             if u.address in spend_from:
                 vins.append({"txid": u.txid, "vout": u.vout})
 
+    args: t.Dict[str, t.Any] = {"includeWatching": True}
+    if fee_rate is not None:
+        args["fee_rate"] = fee_rate
+
     try:
         result = rpcw.walletcreatefundedpsbt(
             vins,  # inputs for txn (manual coin control)
             [{to_address: amount}],
             0,  # locktime
-            {"includeWatching": True},  # options; 'feeRate'?
+            args,  # options; 'feeRate'?
             True,  # bip32derivs - include BIP32 derivation paths for pubkeys if known
         )
     except Exception as e:
@@ -2819,7 +2845,7 @@ def _prepare_send(
 
     # Add up total output amount
     for o in outs:
-        addr = o["scriptPubKey"]["addresses"][0]
+        addr = _get_addrs_from_rpc_output(o["scriptPubKey"])[0]
         try:
             addr_info = rpcw.getaddressinfo(addr)
         except Exception:
@@ -2842,7 +2868,7 @@ def _prepare_send(
 
     # Display outputs
     for o in outs:
-        addr = o["scriptPubKey"]["addresses"][0]
+        addr = _get_addrs_from_rpc_output(o["scriptPubKey"])[0]
         try:
             addr_info = rpcw.getaddressinfo(addr)
         except Exception:
@@ -2891,6 +2917,15 @@ def _can_decode_transaction(rpc: BitcoinRPC, tx_hex: str) -> bool:
     return True
 
 
+def _get_addrs_from_rpc_output(scriptpubkey_dict: dict) -> t.List[str]:
+    if "addresses" in scriptpubkey_dict:
+        # XXX unsure if this is necessary, but might be for older versions of Core.
+        return scriptpubkey_dict["addresses"]
+    elif "address" in scriptpubkey_dict:
+        return [scriptpubkey_dict["address"]]
+    raise ValueError("unexpected scriptPubKey dict")
+
+
 def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     """Display information about the transaction to be performed and confirm."""
     info = rpcw.decoderawtransaction(hex_val)
@@ -2898,16 +2933,12 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     outs: t.List[t.Tuple[str, Decimal]] = []
 
     for out in info["vout"]:
-        spk = out["scriptPubKey"]
-        if "addresses" in spk:
-            # XXX unsure if this is necessary, but might be for older versions of Core.
-            addrs = ",".join(spk["addresses"])
-        elif "address" in spk:
-            addrs = spk["address"]
-        else:
+        try:
+            addrs = _get_addrs_from_rpc_output(out["scriptPubKey"])
+        except ValueError:
             raise RuntimeError(f"unexpected decoderawtransaction format:\n{info}")
 
-        outs.append((addrs, out["value"]))
+        outs.append((addrs[0], out["value"]))
 
     F.alert("About to send a transaction:\n")
 
@@ -2923,8 +2954,9 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
     F.p()
 
     for o in outs:
+        addr = o[0]
         try:
-            addr_info = rpcw.getaddressinfo(o[0])
+            addr_info = rpcw.getaddressinfo(addr)
         except Exception:
             print(f"Couldn't get info for output: {o}")
             # TODO handle this
@@ -2933,7 +2965,7 @@ def confirm_broadcast(rpcw: BitcoinRPC, hex_val: str, psbt_hex: str) -> bool:
         amt = bold(green(f"{o[1]} BTC"))
         yours = addr_info["ismine"] or addr_info["iswatchonly"]
         yours_str = "  (your address)" if yours else ""
-        F.blank(f" -> {bold(o[0])}  ({amt}){yours_str}")
+        F.blank(f" -> {bold(addr)}  ({amt}){yours_str}")
 
     print()
 

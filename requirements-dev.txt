@@ -1,4 +1,4 @@
-mypy
-pytest
-flake8
-black==21.12b0
+mypy==0.942
+pytest==7.1.1
+flake8==4.0.1
+black==22.3.0
