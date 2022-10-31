@@ -487,6 +487,7 @@ class BitcoinRPC(object):
             return self._parsed_url.port
 
     def _getconn(self, timeout=None):
+        assert self._parsed_url.hostname
         return httplib.HTTPConnection(
             self._parsed_url.hostname,
             port=self.port,
@@ -702,6 +703,9 @@ def open_file_browser():
         cmd = "open ."
     elif plat == "Windows":
         cmd = "explorer ."
+    else:
+        logger.warn("can't open file browser: unknown platform")
+        return
 
     subprocess.Popen(
         cmd,
@@ -880,6 +884,7 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
         warn("use `coldcore --rpc <url>`")
         die()
 
+    assert rpc
     hoststr = yellow(f"{rpc.host}:{rpc.port}")
     p(conn_line(f"connected to Bitcoin Core at {hoststr}"))
     p()
@@ -2811,10 +2816,11 @@ def get_node_version(rpc: BitcoinRPC) -> t.Tuple[int, int, int]:
 # -----------------------------------------------------------------------------
 
 
-def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
+def _get_stdout(*args, **kwargs) -> t.Tuple[int, str]:
     """Return (returncode, stdout)."""
     kwargs["shell"] = True
     kwargs["capture_output"] = True
+    kwargs["text"] = True
     result = subprocess.run(*args, **kwargs)
     logger.info(f"sh: {args[0]} -> {result.returncode}")
     return (result.returncode, result.stdout)
@@ -3087,7 +3093,7 @@ class Pass:
         retcode, conf_str = _get_stdout(f"pass show {path}")
         if retcode != 0:
             return None
-        return conf_str.decode().strip()
+        return conf_str.strip()
 
 
 class GPG:
@@ -3133,7 +3139,7 @@ class GPG:
         (retcode, content) = _get_stdout(f"{self.gpg_path} -d {p}")
 
         if retcode == 0:
-            return content.decode().strip()
+            return content.strip()
 
         logger.warning(f"failed to read GPG path {p}, returncode: {retcode}")
         return None
