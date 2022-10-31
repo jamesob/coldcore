@@ -1424,8 +1424,10 @@ class DashboardScene(Scene):
         except ConnectionRefusedError:
             curses.endwin()
             print("", flush=True)
-            F.warn("Unable to connect to Bitcoin Core RPC (%s)" %
-                   self.config.bitcoind_json_url)
+            F.warn(
+                "Unable to connect to Bitcoin Core RPC (%s)"
+                % self.config.bitcoind_json_url
+            )
             F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
             die()
 
@@ -1856,8 +1858,10 @@ def start_ui(config, wallet_configs, action=None):
     except socket.timeout:
         ui_logger.exception("RPC connection timed out")
         print()
-        formatter.warn("Unable to connect to Bitcoin Core RPC (%s) - are you sure " %
-                       config.bitcoind_json_url)
+        formatter.warn(
+            "Unable to connect to Bitcoin Core RPC (%s) - are you sure "
+            % config.bitcoind_json_url
+        )
         formatter.warn("it is running and the RPC URL you gave is correct?")
         formatter.alert("See `--rpc` in `coldcore --help`")
         time.sleep(10)
@@ -2675,10 +2679,10 @@ def discover_rpc(
 def _is_already_loaded_err(e: JSONRPCError) -> bool:
     msg = str(e).lower()
     return (
-        (e.code == -4 and "already loaded" in msg) or
-        ("wallet file" in msg and "is already loaded" in msg) or
-        "duplicate -wallet filename" in msg or
-        "database already exists" in msg
+        (e.code == -4 and "already loaded" in msg)
+        or ("wallet file" in msg and "is already loaded" in msg)
+        or "duplicate -wallet filename" in msg
+        or "database already exists" in msg
     )
 
 
@@ -2739,14 +2743,16 @@ def get_rpc(
             elif _is_already_loading_err(e):
                 logger.info(
                     "wallet %s is already loading - probably in the middle of a rescan",
-                    wallet.bitcoind_name)
+                    wallet.bitcoind_name,
+                )
 
                 scanning = _get_rescan_status(plain_rpc)
                 if scanning:
                     F.info(f"rescanning: progress={scanning['progress']}")
             else:
-                logger.exception("unhandled exception trying to load wallet %s",
-                                 wallet.bitcoind_name)
+                logger.exception(
+                    "unhandled exception trying to load wallet %s", wallet.bitcoind_name
+                )
                 raise
         except TimeoutError:
             # This will trigger the first time we load with a rescan.
@@ -2774,7 +2780,7 @@ def get_rpc(
 
 def _get_rescan_status(rpc) -> t.Optional[dict]:
     try:
-        return rpc.getwalletinfo()['scanning']
+        return rpc.getwalletinfo()["scanning"]
     except Exception:
         logger.exception("failed to get scanning status")
     return None
