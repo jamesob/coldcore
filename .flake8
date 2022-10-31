@@ -1,0 +1,9 @@
+[flake8]
+extend-ignore = 
+  # import at top of file
+  E402,
+  # line length
+  E501,
+  # linebreak operator
+  W503,
+  W504
