@@ -1568,7 +1568,7 @@ class DashboardScene(Scene):
                 if to_clipboard(addr):
                     self.flash_msg = f"copied address '{addr}' to clipboard"
                 else:
-                    self.flash_msg = f"no clipboard program found!"
+                    self.flash_msg = "no clipboard program found!"
 
         # --- Paint the chain history window
 
@@ -2777,7 +2777,7 @@ def _get_rescan_status(rpc) -> t.Optional[dict]:
         return rpc.getwalletinfo()['scanning']
     except Exception:
         logger.exception("failed to get scanning status")
-
+    return None
 
 
 def _get_rpc_inner(
