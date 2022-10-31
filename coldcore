@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -u
 """
          _   _
  ___ ___| |_| |___ ___ ___ ___
@@ -67,6 +67,11 @@ clii_logger = logging.getLogger("clii")
 if os.environ.get("CLII_DEBUG"):
     clii_logger.setLevel(logging.DEBUG)
     clii_logger.addHandler(logging.StreamHandler())
+
+
+def die():
+    sys.stdout.flush()
+    sys.exit(1)
 
 
 class Arg:
@@ -271,7 +276,7 @@ class App:
 
         if not fnc:
             self.parser.print_help()
-            sys.exit(1)
+            die()
 
         func_args = []
         func_kwargs = {}
@@ -482,6 +487,7 @@ class BitcoinRPC(object):
             return self._parsed_url.port
 
     def _getconn(self, timeout=None):
+        assert self._parsed_url.hostname
         return httplib.HTTPConnection(
             self._parsed_url.hostname,
             port=self.port,
@@ -697,6 +703,9 @@ def open_file_browser():
         cmd = "open ."
     elif plat == "Windows":
         cmd = "explorer ."
+    else:
+        logger.warn("can't open file browser: unknown platform")
+        return
 
     subprocess.Popen(
         cmd,
@@ -873,8 +882,9 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     if not rpc:
         warn("couldn't detect Bitcoin Core - make sure it's running locally, or")
         warn("use `coldcore --rpc <url>`")
-        sys.exit(1)
+        die()
 
+    assert rpc
     hoststr = yellow(f"{rpc.host}:{rpc.port}")
     p(conn_line(f"connected to Bitcoin Core at {hoststr}"))
     p()
@@ -910,7 +920,7 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
 
     if not config:
         warn("Couldn't obtain config. Exiting.")
-        sys.exit(1)
+        die()
 
     p()
 
@@ -973,17 +983,17 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
         if "key 'tpub" in str(e):
             warn("it looks like you're using a testnet config with a mainnet rpc.")
             warn("rerun this with `coldcore --rpc <testnet-rpc-url> setup`")
-            sys.exit(1)
+            die()
         if "key 'xpub" in str(e):
             warn("it looks like you're using a mainnet config with a testnet rpc.")
             warn("rerun this with `coldcore --rpc <mainnet-rpc-url> setup`")
-            sys.exit(1)
+            die()
         warn("error parsing public.txt contents")
         warn("check your public.txt file and try this again, or file a bug:")
         warn("  github.com/jamesob/coldcore/issues")
         p()
         traceback.print_exc()
-        sys.exit(1)
+        die()
 
     p()
     done("parsed xpub as ")
@@ -1418,9 +1428,13 @@ class DashboardScene(Scene):
             self.start_threads()
         except ConnectionRefusedError:
             curses.endwin()
-            F.warn("Unable to connect to Bitcoin Core RPC")
+            print("", flush=True)
+            F.warn(
+                "Unable to connect to Bitcoin Core RPC (%s)"
+                % self.config.bitcoind_json_url
+            )
             F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
-            sys.exit(1)
+            die()
 
         # --- Paint the balances window
 
@@ -1561,7 +1575,7 @@ class DashboardScene(Scene):
                 if to_clipboard(addr):
                     self.flash_msg = f"copied address '{addr}' to clipboard"
                 else:
-                    self.flash_msg = f"no clipboard program found!"
+                    self.flash_msg = "no clipboard program found!"
 
         # --- Paint the chain history window
 
@@ -1802,6 +1816,14 @@ def draw_menu(scr, config, wallet_configs, action=None):
                 k = -1
                 action = GoHome
             elif action == GoDashboard:
+                # First, ensure we can actually load the RPC. This will throw errors
+                # if the bitcoin core connection isn't functioning.
+                #
+                # Clear the screen becasuse this may be printing rescan status.
+                scr.clear()
+                config.rpc(wallet_configs[0], timeout=2)
+                scr.clear()
+
                 (k, action) = dashboard.draw(k)
         except curses.error:
             scr = curses.initscr()
@@ -1837,15 +1859,23 @@ def start_ui(config, wallet_configs, action=None):
         print()
         formatter.warn("The UI crashed! Terminal might be too small, try resizing.")
         print()
-        sys.exit(1)
+        die()
     except socket.timeout:
         ui_logger.exception("RPC connection timed out")
         print()
-        formatter.warn("Unable to connect to Bitcoin Core RPC - are you sure ")
+        formatter.warn(
+            "Unable to connect to Bitcoin Core RPC (%s) - are you sure "
+            % config.bitcoind_json_url
+        )
         formatter.warn("it is running and the RPC URL you gave is correct?")
         formatter.alert("See `--rpc` in `coldcore --help`")
+        time.sleep(10)
         print()
-        sys.exit(1)
+        die()
+    except Exception as e:
+        formatter.warn("Hit unexpected exception")
+        print(e)
+        die()
 
 
 # --- main/CLI ------------------------------------------------------------------------
@@ -2094,7 +2124,7 @@ def ui():
             print()
             print("Wallet not found - are you using a new instance of bitcoind?")
             print("If so, reinitialize with `coldcore reinit-wallet`")
-            sys.exit(1)
+            die()
         else:
             raise
 
@@ -2298,7 +2328,7 @@ class Wallet:
                 msg = f"Failed to read config for wallet {name} ({load_from})"
                 logger.exception(msg)
                 F.warn(msg)
-                sys.exit(1)
+                die()
 
             this_conf = conf2[name]
 
@@ -2654,11 +2684,17 @@ def discover_rpc(
 def _is_already_loaded_err(e: JSONRPCError) -> bool:
     msg = str(e).lower()
     return (
-        e.code == -4
-        or ("already loaded" in msg)
-        or ("duplicate -wallet filename" in msg)
-        or ("database already exists" in msg)
+        (e.code == -4 and "already loaded" in msg)
+        or ("wallet file" in msg and "is already loaded" in msg)
+        or "duplicate -wallet filename" in msg
+        or "database already exists" in msg
     )
+
+
+def _is_already_loading_err(e: JSONRPCError) -> bool:
+    """Thrown when we try to load the wallet while rescanning."""
+    msg = str(e).lower()
+    return e.code == -4 and ("already loading" in msg)
 
 
 def get_rpc(
@@ -2687,21 +2723,72 @@ def get_rpc(
     if not wallet:
         got = _get_rpc_inner(url, **kwargs)
         cache[cache_key] = got
-    else:
-        plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
+        return got
+
+    # Otherwise, handle loading the wallet...
+
+    plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
+    loaded = False
+    tries = 100
+
+    while tries > 0 and not loaded:
+        # Fairly complicated logic here because we have to deal with a rescan
+        # potentially being kicked off on the first loadwallet call.
         try:
             # We have to ensure the wallet is loaded before accessing its
             # RPC.
             plain_rpc.loadwallet(wallet.bitcoind_name)
+            loaded = True
         except JSONRPCError as e:
             # Wallet already loaded.
-            if not _is_already_loaded_err(e):
+            if _is_already_loaded_err(e):
+                loaded = True
+                logger.debug("wallet %s already loaded", wallet.bitcoind_name)
+                break
+            elif _is_already_loading_err(e):
+                logger.info(
+                    "wallet %s is already loading - probably in the middle of a rescan",
+                    wallet.bitcoind_name,
+                )
+
+                scanning = _get_rescan_status(plain_rpc)
+                if scanning:
+                    F.info(f"rescanning: progress={scanning['progress']}")
+            else:
+                logger.exception(
+                    "unhandled exception trying to load wallet %s", wallet.bitcoind_name
+                )
                 raise
-        cache[cache_key] = _get_rpc_inner(
-            url, net_name=wallet.net_name, wallet_name=wallet.bitcoind_name, **kwargs
-        )
+        except TimeoutError:
+            # This will trigger the first time we load with a rescan.
+
+            scanning = _get_rescan_status(plain_rpc)
+            if scanning:
+                # Node is rescanning wallet, not loaded yet
+                F.warn(f"Timed out loading wallet: we are rescanning: {scanning}")
+            else:
+                raise
+
+        time.sleep(1)
+        tries -= 1
+
+    if tries <= 0:
+        F.warn("failed to load wallet")
+        die()
+
+    cache[cache_key] = _get_rpc_inner(
+        url, net_name=wallet.net_name, wallet_name=wallet.bitcoind_name, **kwargs
+    )
 
     return cache[cache_key]
+
+
+def _get_rescan_status(rpc) -> t.Optional[dict]:
+    try:
+        return rpc.getwalletinfo()["scanning"]
+    except Exception:
+        logger.exception("failed to get scanning status")
+    return None
 
 
 def _get_rpc_inner(
@@ -2729,10 +2816,11 @@ def get_node_version(rpc: BitcoinRPC) -> t.Tuple[int, int, int]:
 # -----------------------------------------------------------------------------
 
 
-def _get_stdout(*args, **kwargs) -> t.Tuple[int, bytes]:
+def _get_stdout(*args, **kwargs) -> t.Tuple[int, str]:
     """Return (returncode, stdout)."""
     kwargs["shell"] = True
     kwargs["capture_output"] = True
+    kwargs["text"] = True
     result = subprocess.run(*args, **kwargs)
     logger.info(f"sh: {args[0]} -> {result.returncode}")
     return (result.returncode, result.stdout)
@@ -3005,7 +3093,7 @@ class Pass:
         retcode, conf_str = _get_stdout(f"pass show {path}")
         if retcode != 0:
             return None
-        return conf_str.decode().strip()
+        return conf_str.strip()
 
 
 class GPG:
@@ -3051,7 +3139,7 @@ class GPG:
         (retcode, content) = _get_stdout(f"{self.gpg_path} -d {p}")
 
         if retcode == 0:
-            return content.decode().strip()
+            return content.strip()
 
         logger.warning(f"failed to read GPG path {p}, returncode: {retcode}")
         return None
@@ -3202,7 +3290,7 @@ def _get_config_required(*args, **kwargs) -> t.Tuple[GlobalConfig, t.List[Wallet
     ret = _get_config(*args, **kwargs)
     if not ret[0]:
         F.warn("Please ensure this file is readable or run `coldcore` -> setup")
-        sys.exit(1)
+        die()
 
     return ret  # type: ignore
 
@@ -3284,7 +3372,7 @@ def _get_config(
     if require_wallets and not wallet_confs:
         F.warn("At least one wallet config is required but none were found.")
         F.warn("Try running `coldcore setup --help` to set up a wallet")
-        sys.exit(1)
+        die()
 
     return (conf, wallet_confs)
 
