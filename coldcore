@@ -1809,6 +1809,14 @@ def draw_menu(scr, config, wallet_configs, action=None):
                 k = -1
                 action = GoHome
             elif action == GoDashboard:
+                # First, ensure we can actually load the RPC. This will throw errors
+                # if the bitcoin core connection isn't functioning.
+                #
+                # Clear the screen becasuse this may be printing rescan status.
+                scr.clear()
+                config.rpc(wallet_configs[0], timeout=2)
+                scr.clear()
+
                 (k, action) = dashboard.draw(k)
         except curses.error:
             scr = curses.initscr()
@@ -2667,11 +2675,17 @@ def discover_rpc(
 def _is_already_loaded_err(e: JSONRPCError) -> bool:
     msg = str(e).lower()
     return (
-        e.code == -4
-        or ("already loaded" in msg)
-        or ("duplicate -wallet filename" in msg)
-        or ("database already exists" in msg)
+        (e.code == -4 and "already loaded" in msg) or
+        ("wallet file" in msg and "is already loaded" in msg) or
+        "duplicate -wallet filename" in msg or
+        "database already exists" in msg
     )
+
+
+def _is_already_loading_err(e: JSONRPCError) -> bool:
+    """Thrown when we try to load the wallet while rescanning."""
+    msg = str(e).lower()
+    return e.code == -4 and ("already loading" in msg)
 
 
 def get_rpc(
@@ -2700,21 +2714,70 @@ def get_rpc(
     if not wallet:
         got = _get_rpc_inner(url, **kwargs)
         cache[cache_key] = got
-    else:
-        plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
+        return got
+
+    # Otherwise, handle loading the wallet...
+
+    plain_rpc = _get_rpc_inner(url, net_name=wallet.net_name, **kwargs)
+    loaded = False
+    tries = 100
+
+    while tries > 0 and not loaded:
+        # Fairly complicated logic here because we have to deal with a rescan
+        # potentially being kicked off on the first loadwallet call.
         try:
             # We have to ensure the wallet is loaded before accessing its
             # RPC.
             plain_rpc.loadwallet(wallet.bitcoind_name)
+            loaded = True
         except JSONRPCError as e:
             # Wallet already loaded.
-            if not _is_already_loaded_err(e):
+            if _is_already_loaded_err(e):
+                loaded = True
+                logger.debug("wallet %s already loaded", wallet.bitcoind_name)
+                break
+            elif _is_already_loading_err(e):
+                logger.info(
+                    "wallet %s is already loading - probably in the middle of a rescan",
+                    wallet.bitcoind_name)
+
+                scanning = _get_rescan_status(plain_rpc)
+                if scanning:
+                    F.info(f"rescanning: progress={scanning['progress']}")
+            else:
+                logger.exception("unhandled exception trying to load wallet %s",
+                                 wallet.bitcoind_name)
                 raise
-        cache[cache_key] = _get_rpc_inner(
-            url, net_name=wallet.net_name, wallet_name=wallet.bitcoind_name, **kwargs
-        )
+        except TimeoutError:
+            # This will trigger the first time we load with a rescan.
+
+            scanning = _get_rescan_status(plain_rpc)
+            if scanning:
+                # Node is rescanning wallet, not loaded yet
+                F.warn(f"Timed out loading wallet: we are rescanning: {scanning}")
+            else:
+                raise
+
+        time.sleep(1)
+        tries -= 1
+
+    if tries <= 0:
+        F.warn("failed to load wallet")
+        die()
+
+    cache[cache_key] = _get_rpc_inner(
+        url, net_name=wallet.net_name, wallet_name=wallet.bitcoind_name, **kwargs
+    )
 
     return cache[cache_key]
+
+
+def _get_rescan_status(rpc) -> t.Optional[dict]:
+    try:
+        return rpc.getwalletinfo()['scanning']
+    except Exception:
+        logger.exception("failed to get scanning status")
+
 
 
 def _get_rpc_inner(
