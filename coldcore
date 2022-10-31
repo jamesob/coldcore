@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -u
 """
          _   _
  ___ ___| |_| |___ ___ ___ ___
@@ -67,6 +67,11 @@ clii_logger = logging.getLogger("clii")
 if os.environ.get("CLII_DEBUG"):
     clii_logger.setLevel(logging.DEBUG)
     clii_logger.addHandler(logging.StreamHandler())
+
+
+def die():
+    sys.stdout.flush()
+    sys.exit(1)
 
 
 class Arg:
@@ -271,7 +276,7 @@ class App:
 
         if not fnc:
             self.parser.print_help()
-            sys.exit(1)
+            die()
 
         func_args = []
         func_kwargs = {}
@@ -873,7 +878,7 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     if not rpc:
         warn("couldn't detect Bitcoin Core - make sure it's running locally, or")
         warn("use `coldcore --rpc <url>`")
-        sys.exit(1)
+        die()
 
     hoststr = yellow(f"{rpc.host}:{rpc.port}")
     p(conn_line(f"connected to Bitcoin Core at {hoststr}"))
@@ -910,7 +915,7 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
 
     if not config:
         warn("Couldn't obtain config. Exiting.")
-        sys.exit(1)
+        die()
 
     p()
 
@@ -973,17 +978,17 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
         if "key 'tpub" in str(e):
             warn("it looks like you're using a testnet config with a mainnet rpc.")
             warn("rerun this with `coldcore --rpc <testnet-rpc-url> setup`")
-            sys.exit(1)
+            die()
         if "key 'xpub" in str(e):
             warn("it looks like you're using a mainnet config with a testnet rpc.")
             warn("rerun this with `coldcore --rpc <mainnet-rpc-url> setup`")
-            sys.exit(1)
+            die()
         warn("error parsing public.txt contents")
         warn("check your public.txt file and try this again, or file a bug:")
         warn("  github.com/jamesob/coldcore/issues")
         p()
         traceback.print_exc()
-        sys.exit(1)
+        die()
 
     p()
     done("parsed xpub as ")
@@ -1418,9 +1423,11 @@ class DashboardScene(Scene):
             self.start_threads()
         except ConnectionRefusedError:
             curses.endwin()
-            F.warn("Unable to connect to Bitcoin Core RPC")
+            print("", flush=True)
+            F.warn("Unable to connect to Bitcoin Core RPC (%s)" %
+                   self.config.bitcoind_json_url)
             F.warn("Ensure Core is running or use `coldcore --rpc <url>`")
-            sys.exit(1)
+            die()
 
         # --- Paint the balances window
 
@@ -1837,15 +1844,21 @@ def start_ui(config, wallet_configs, action=None):
         print()
         formatter.warn("The UI crashed! Terminal might be too small, try resizing.")
         print()
-        sys.exit(1)
+        die()
     except socket.timeout:
         ui_logger.exception("RPC connection timed out")
         print()
-        formatter.warn("Unable to connect to Bitcoin Core RPC - are you sure ")
+        formatter.warn("Unable to connect to Bitcoin Core RPC (%s) - are you sure " %
+                       config.bitcoind_json_url)
         formatter.warn("it is running and the RPC URL you gave is correct?")
         formatter.alert("See `--rpc` in `coldcore --help`")
+        time.sleep(10)
         print()
-        sys.exit(1)
+        die()
+    except Exception as e:
+        formatter.warn("Hit unexpected exception")
+        print(e)
+        die()
 
 
 # --- main/CLI ------------------------------------------------------------------------
@@ -2094,7 +2107,7 @@ def ui():
             print()
             print("Wallet not found - are you using a new instance of bitcoind?")
             print("If so, reinitialize with `coldcore reinit-wallet`")
-            sys.exit(1)
+            die()
         else:
             raise
 
@@ -2298,7 +2311,7 @@ class Wallet:
                 msg = f"Failed to read config for wallet {name} ({load_from})"
                 logger.exception(msg)
                 F.warn(msg)
-                sys.exit(1)
+                die()
 
             this_conf = conf2[name]
 
@@ -3202,7 +3215,7 @@ def _get_config_required(*args, **kwargs) -> t.Tuple[GlobalConfig, t.List[Wallet
     ret = _get_config(*args, **kwargs)
     if not ret[0]:
         F.warn("Please ensure this file is readable or run `coldcore` -> setup")
-        sys.exit(1)
+        die()
 
     return ret  # type: ignore
 
@@ -3284,7 +3297,7 @@ def _get_config(
     if require_wallets and not wallet_confs:
         F.warn("At least one wallet config is required but none were found.")
         F.warn("Try running `coldcore setup --help` to set up a wallet")
-        sys.exit(1)
+        die()
 
     return (conf, wallet_confs)
 
