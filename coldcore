@@ -1617,7 +1617,6 @@ class DashboardScene(Scene):
                 scr.addstr(0, 0, msg)
 
         scr.refresh()
-
         # scr.move(self.width, self.height)
 
         scr.timeout(2000)
@@ -1774,12 +1773,17 @@ def draw_menu(scr, config, wallet_configs, action=None):
     dashboard = DashboardScene(scr, config, wallet_configs)
 
     action = action or GoHome
+    last_action = None
     k = 0
 
     while action != Quit:
         # Initialization
-        scr.clear()
         height, width = scr.getmaxyx()
+
+        # Resize or scene changed; repaint the screen.
+        if k == curses.KEY_RESIZE or last_action != action:
+            scr.clear()
+            scr.refresh()
 
         try:
             kstr = curses.keyname(k).decode()
@@ -1806,6 +1810,7 @@ def draw_menu(scr, config, wallet_configs, action=None):
 
             if action == GoHome:
                 (k, action) = home.draw(k)
+                last_action = GoHome
             elif action == GoSetup:
                 config, wallet = run_setup(config)
                 # Reinitialize the scenes
@@ -1815,16 +1820,14 @@ def draw_menu(scr, config, wallet_configs, action=None):
                     dashboard = DashboardScene(scr, config, wallet_configs)
                 k = -1
                 action = GoHome
+                last_action = GoSetup
             elif action == GoDashboard:
                 # First, ensure we can actually load the RPC. This will throw errors
                 # if the bitcoin core connection isn't functioning.
-                #
-                # Clear the screen becasuse this may be printing rescan status.
-                scr.clear()
                 config.rpc(wallet_configs[0], timeout=2)
-                scr.clear()
 
                 (k, action) = dashboard.draw(k)
+                last_action = GoDashboard
         except curses.error:
             scr = curses.initscr()
             scr.clear()
@@ -1833,7 +1836,6 @@ def draw_menu(scr, config, wallet_configs, action=None):
             scr.addstr(1, 1, "! terminal too small.")
             scr.addstr(2, 1, "! resize to make larger")
             scr.addstr(3, 1, "! or press 'q' to exit.")
-            scr.refresh()
             time.sleep(0.3)
             k = scr.getch()
 
