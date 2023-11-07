@@ -2686,7 +2686,7 @@ def discover_rpc(
 def _is_already_loaded_err(e: JSONRPCError) -> bool:
     msg = str(e).lower()
     return (
-        (e.code == -4 and "already loaded" in msg)
+        (e.code in [-4, -35] and "already loaded" in msg)
         or ("wallet file" in msg and "is already loaded" in msg)
         or "duplicate -wallet filename" in msg
         or "database already exists" in msg
