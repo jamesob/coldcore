@@ -2153,7 +2153,13 @@ def init_wallet_in_core(config, rpc, wallet) -> BitcoinRPC:
     F.done(f"created wallet {yellow(wallet.name)} in Core as watch-only")
 
     rpcw = config.rpc(wallet)
-    rpcw.importmulti(*wallet.importmulti_args())
+    try:
+        rpcw.importmulti(*wallet.importmulti_args())
+    except JSONRPCError:
+        # Could be a descriptor wallet, try that.
+        # TODO: make descriptor wallet status a first class piece of metadata.
+        rpcw.importdescriptors(*wallet.importmulti_args())
+
     F.done("imported descriptors 0/* and 1/* (change)")
 
     scan_result = {}  # type: ignore
@@ -2852,7 +2858,7 @@ def rpc_wallet_create(rpc: BitcoinRPC, wall: Wallet):
                 True,  # blank
                 None,  # passphrase
                 False,  # avoid_reuse
-                False,  # descriptors
+                True,  # descriptors
             )
     except JSONRPCError as e:
         if not _is_already_loaded_err(e):
