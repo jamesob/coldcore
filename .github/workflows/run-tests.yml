@@ -27,8 +27,8 @@ jobs:
         cp coldcore coldcore.py
         echo "PYTHONPATH=$(pwd)" >> $GITHUB_ENV
 
-    - name: black
-      run: black --check coldcore
+    - name: yapf
+      run: yapf --diff coldcore
 
     - name: flake8
       run: |

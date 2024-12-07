@@ -10,7 +10,7 @@ test: docker-build
 
 lint: docker-build
 	docker run --rm -v $$(pwd):/src:ro coldcore/test flake8 coldcore
-	docker run --rm -v $$(pwd):/src:ro coldcore/test black --check coldcore
+	docker run --rm -v $$(pwd):/src:ro coldcore/test yapf --diff coldcore
 	docker run --rm -v $$(pwd):/src:ro coldcore/test mypy coldcore
 
 .PHONY: docker-build lint test

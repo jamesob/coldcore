@@ -1,3 +1,4 @@
+- Move from `black` to `yapf` for formatting
 
 ## 0.4.1
 
