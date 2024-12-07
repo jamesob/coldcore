@@ -10,6 +10,7 @@
 
 # TODO
 
+- [ ] validate newaddr results against a BIP32/secp derivation for total assurance
 - [ ] add version birthday to new config
 - [ ] allow manual coin selection when sending
 - [ ] implement scrolling in the curses balance panel
@@ -57,7 +58,7 @@ from typing import IO, Optional as Op
 from configparser import ConfigParser
 
 
-__VERSION__ = "0.3.1"
+__VERSION__ = "0.4.1"
 
 
 # --- command line parsing ------------------------------------------------------------
@@ -341,6 +342,10 @@ class JSONRPCError(Exception):
     @property
     def code(self) -> int:
         return int(self.error["code"])
+
+    @property
+    def message(self) -> str:
+        return self.error['message']
 
 
 class BitcoinRPC(object):
@@ -733,13 +738,6 @@ def conn_line(msg: str) -> str:
     return green(bold(" ○  ")) + msg
 
 
-# 8 bit Color
-###############################################################################
-#
-# TODO this color stuff was taken from some Github page; track it down and credit
-# the authos.
-
-
 def make_color(start, end: str) -> t.Callable[[str], str]:
     def color_func(s: str) -> str:
         if not use_color():
@@ -845,6 +843,25 @@ class MenuItem(namedtuple("MenuItem", "idx,title,action")):
         return (self.idx, self.title, mchoice == self)
 
 
+def print_qr(data, prompt: bool = False):
+    """If the user has a `qrencode` binary installed, print the QR to the screen."""
+    if subprocess.run(
+            'which qrencode', shell=True, capture_output=True).returncode != 0:
+        return
+
+    if prompt:
+        if F.inp("show QR code? [y/N] ").strip().lower() != 'y':
+            return
+
+    try:
+        print()
+        subprocess.run("qrencode -t ANSIUTF8", input=data, text=True, shell=True)
+        print()
+    except Exception:
+        logger.exception("failed to print QR code")
+
+
+
 def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     curses.endwin()
     os.system("cls" if os.name == "nt" else "clear")
@@ -877,16 +894,16 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     )
     p(title)
 
-    blank("searching for Bitcoin Core...")
+    blank("Searching for Bitcoin Core...")
     rpc = discover_rpc(config)
     if not rpc:
-        warn("couldn't detect Bitcoin Core - make sure it's running locally, or")
+        warn("Couldn't detect Bitcoin Core - make sure it's running locally, or")
         warn("use `coldcore --rpc <url>`")
         die()
 
     assert rpc
     hoststr = yellow(f"{rpc.host}:{rpc.port}")
-    p(conn_line(f"connected to Bitcoin Core at {hoststr}"))
+    p(conn_line(f"Connected to Bitcoin Core at {hoststr}"))
     p()
 
     def delay(t: float = 1.0):
@@ -894,12 +911,12 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
 
     use_gpg = False
     if not config:
-        section("coldcore config file setup")
+        section("Coldcore config file setup")
         delay()
-        pre = "you can encrypt your config file with"
+        pre = "You can encrypt your config file with"
 
         if _get_gpg_command():
-            prompt = "do you want to use GPG to encrypt your coldcore config? [y/N] "
+            prompt = "Do you want to use GPG to encrypt your coldcore config? [y/N] "
             if inp(prompt) == "y":
                 use_gpg = True
 
@@ -910,13 +927,13 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
             delay()
 
         defaultpath = get_path_for_new_config(use_gpg)
-        where = inp(f"where should I store your config? [{defaultpath}] ")
+        where = inp(f"Where should I store your config? [{defaultpath}] ")
         where = where or defaultpath
         config = create_config(where, rpc.url)
     else:
         if config.loaded_from.endswith(".gpg"):
             use_gpg = True
-        done(f"loaded config from {yellow(config.loaded_from)}")
+        done(f"Loaded config from {yellow(config.loaded_from)}")
 
     if not config:
         warn("Couldn't obtain config. Exiting.")
@@ -931,7 +948,7 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
         "(https://coldcardwallet.com/docs/quick)? [press enter] "
     )
 
-    blank("checking Bitcoin Core sync progres...")
+    blank("Checking Bitcoin Core sync progres...")
     chaininfo = {"verificationprogress": 0}
     while chaininfo["verificationprogress"] < 0.999:
         try:
@@ -942,65 +959,75 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
         info(f"initial block download progress: {prog}%", clear=True)
 
     height = f"(height: {yellow(str(chaininfo['blocks']))})"
-    done(f"chain sync completed {height}      ", clear=True)
+    done(f"Chain sync completed {height}      ", clear=True)
     delay()
     p()
     p()
 
-    section("xpub import from Coldcard")
+    section("Xpub import from Coldcard")
     delay()
 
-    blank("now we're going to import your wallet's public information")
-    blank("on your coldcard, go to Advanced > MicroSD > Dump Summary")
-    blank("(see: https://coldcardwallet.com/docs/microsd#dump-summary-file)")
+    blank("Now we're going to import your wallet's public information\n")
+    p()
+    blank("-> for coldcard MK2/3/4, go to Advanced > MicroSD > Dump Summary")
+    blank("  (see: https://coldcardwallet.com/docs/microsd#dump-summary-file)")
+    p()
+    blank("-> for coldcard Q, go to Advanced/Tools > Export Wallet > Generic JSON")
     p()
     delay()
-    warn("this is not key material, but it can be used to track your addresses")
+    warn("This data is not key material, but it can be used to track your addresses")
     p()
     delay()
     cwd = os.getcwd()
-    task(f"place this file in this directory ({cwd})")
+    task(f"Place this file in this directory ({cwd})")
     delay()
     p()
 
-    pubfilepath = Path("./public.txt")
-    if not pubfilepath.exists():
-        prompt = "would you like me to open a file explorer for you here? [Y/n] "
+    possible_paths = (Path('./public.txt'), Path('coldcard-export.json'))
+
+    if not any(path.exists() for path in possible_paths):
+        prompt = "Would you like me to open a file explorer for you here? [Y/n] "
         if inp(prompt).lower() in ["y", ""]:
             open_file_browser()
 
     pubfile = None
     while not pubfile:
-        spin("waiting for public.txt")
+        spin("Waiting for public.txt (or coldcard-export.json)")
         time.sleep(0.1)
-        if pubfilepath.exists():
-            pubfile = pubfilepath
+        for path in possible_paths:
+            if path.exists():
+                pubfile = path
 
     try:
-        wallet = CCWallet.from_io(io.StringIO(pubfile.read_text()), rpc)
+        if str(path).endswith('.txt'):
+            wallet = CCWallet.from_io(io.StringIO(pubfile.read_text()), rpc)
+        elif str(path).endswith('.json'):
+            wallet = CCWallet.from_json(json.loads(pubfile.read_text()), rpc)
     except Exception as e:
         p()
         if "key 'tpub" in str(e):
-            warn("it looks like you're using a testnet config with a mainnet rpc.")
+            warn("It looks like you're using a testnet config with a mainnet rpc.")
             warn("rerun this with `coldcore --rpc <testnet-rpc-url> setup`")
             die()
         if "key 'xpub" in str(e):
-            warn("it looks like you're using a mainnet config with a testnet rpc.")
+            warn("It looks like you're using a mainnet config with a testnet rpc.")
             warn("rerun this with `coldcore --rpc <mainnet-rpc-url> setup`")
             die()
-        warn("error parsing public.txt contents")
-        warn("check your public.txt file and try this again, or file a bug:")
+        warn("Error parsing wallet export contents")
+        warn("Check your wallet export file and try this again, or file a bug:")
         warn("  github.com/jamesob/coldcore/issues")
         p()
         traceback.print_exc()
         die()
 
     p()
-    done("parsed xpub as ")
-    blank(f"  {yellow(wallet.descriptor_base)}")
+    done("Parsed xpub as ")
+    for desc in wallet.descriptors:
+        blank(f"  - {yellow(desc.base)}")
     p()
 
-    walletname = inp(f"name of this wallet? [{wallet.name}] ")
+    # TODO: detect/warn existing name conflicts
+    walletname = inp(f"Name of this wallet? [{wallet.name}] ")
     if walletname:
         wallet.name = walletname
 
@@ -1010,31 +1037,32 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
 
     if use_gpg or config.loaded_from.startswith("pass:"):
         info(
-            "writing wallet to encrypted config; GPG may prompt you "
+            "Writing wallet to encrypted config; GPG may prompt you "
             "for your password [press enter] "
         )
         input()
 
     config.write()
-    done(f"wrote config to {config.loaded_from}")
+    done(f"Wrote config to {config.loaded_from}")
     p()
 
     rpcw = init_wallet_in_core(config, rpc, wallet)
     p()
 
-    got = inp("do you want to perform some test transactions? [Y/n] ").lower()
+    got = inp("Do you want to perform a test transaction? [Y/n] ").strip().lower()
 
-    if got not in ["y", ""]:
+    if got not in ("y", ""):
         return finish(config, wallet)
 
-    section("test transactions")
+    section("Test transactions")
 
     receive_addr1 = rpcw.getnewaddress()
-    task("send a tiny amount (we're talking like ~0.000001 BTC) to")
+    task("Send a tiny amount (we're talking like ~0.000001 BTC) to")
     p()
     blank(f"  {yellow(receive_addr1)}")
+    print_qr(receive_addr1)
     p()
-    blank("(obviously, this is an address you own)")
+    blank("This is an address in your new wallet.")
     p()
 
     got_utxo = None
@@ -1048,15 +1076,17 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
 
     p()
     done(
-        f"received amount of {green(str(got_utxo.amount))} "
+        f"Received amount of {green(str(got_utxo.amount))} "
         f"(txid {got_utxo.txid[:8]})"
     )
     p()
 
-    info("great - now let's test your ability to send")
+    # TODO move to h2
+    info("Let's now test your ability to send")
+
     info(
-        "we're going to send 90% of the value of the last UTXO over "
-        "to a new address:"
+        "We are going to send 90% of the value of the last UTXO over "
+        "to a new address, also owned by your new wallet:"
     )
     sendtoaddr = rpcw.getnewaddress()
     p()
@@ -1071,35 +1101,40 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
         sendtoaddr,
         send_amt,
         [got_utxo.address],
+        prompt_show_qr=False,  # we do this after some messaging
     )
+    txhex = Path(prepared_tx).read_bytes().hex()
 
     info(
         "I've prepared a transaction for you to sign in a "
         f"file called '{prepared_tx}'"
     )
     p()
+    print_qr(txhex, prompt=True)
 
     task("transfer this file to your Coldcard and sign it")
     p()
     warn(
-        "as always, remember to verify all transaction details on the Coldcard "
-        "display"
+        "As always, remember to verify all transaction details on the Coldcard "
+        "display."
     )
     warn(
-        "the Coldcard should say something like "
-        "'Consolidating ... within wallet' when signing"
+        "The Coldcard should say something like "
+        "'Consolidating ... within wallet' when signing."
     )
     p()
 
-    prompt = "would you like me to open a file explorer for you here? [Y/n] "
+    prompt = "Would you like me to open a file explorer for you here? [Y/n] "
     if inp(prompt).lower() in ["y", ""]:
         open_file_browser()
 
     # TODO: coldcard specific?
     signed_filename = prepared_tx.replace(".psbt", "-signed.psbt")
 
+    # TODO: the user may have broadcast the spend out of band with a QR reader
+    # elsewhere, so also check for the existence of our expected UTXO
     while not Path(signed_filename).exists():
-        spin(f"waiting for the signed file ({signed_filename})")
+        spin(f"Waiting for the signed file ({signed_filename})")
         time.sleep(0.5)
 
     # TODO clean this up
@@ -1107,19 +1142,19 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
     txhex = _psbt_to_tx_hex(rpcw, Path(signed_filename))
     p()
     p()
-    done("cool! got the signed PSBT")
+    done("Recieved the signed PSBT")
 
     if not confirm_broadcast(rpcw, txhex, psbt_hex):
-        warn("aborting - doublespend the inputs immediately")
+        warn("Aborting - doublespend the inputs immediately")
         return finish(config, wallet)
 
     rpcw.sendrawtransaction(txhex)
-    done("transaction broadcast!")
+    done("Transaction broadcast successfully")
     p()
 
     inmempool = False
     while not inmempool:
-        spin("waiting to see the transaction in the mempool")
+        spin("Waiting to see the transaction in the mempool")
         utxos = get_utxos(rpcw)
         matching = [u for u in utxos.values() if u.address == sendtoaddr]
         if matching:
@@ -1129,11 +1164,11 @@ def run_setup(config) -> t.Tuple[t.Any, t.Any]:
             inmempool = True
 
     p()
-    done(f"saw tx {got_utxo.txid}")
+    done(f"Saw tx {got_utxo.txid}")
     p()
 
-    section("done")
-    done(bold(f"your wallet {yellow(wallet.name)} is good to go"))
+    section("Done")
+    done(bold(f"Your wallet {yellow(wallet.name)} is ready"))
     p()
     p()
 
@@ -1376,8 +1411,10 @@ class DashboardScene(Scene):
                 try:
                     rpcw = self.config.rpc(wall)
                     self.new_addrs.append(rpcw.getnewaddress())
-                except Exception:
-                    ui_logger.info("call to getnewadddress failed", exc_info=True)
+                except JSONRPCError as e:
+                    self.flash_msg = f"call to getnewaddress failed: '{e.message}'"
+                    ui_logger.info(
+                        "call to getnewadddress failed: %s", e.message, exc_info=True)
 
         utxo_addrs = {u.address for u in self.utxos.values()}
         # Strip out used addresses.
@@ -1443,7 +1480,7 @@ class DashboardScene(Scene):
         with attrs(self.balance_win, *border_attrs):
             self.balance_win.border()
         with attrs(self.balance_win, *title_attrs):
-            _s(self.balance_win, 0, 2, " UTXOs ")
+            _s(self.balance_win, 0, 2, f" UTXOs  [ {wall.name} ] ")
 
         _s(
             self.balance_win,
@@ -1790,7 +1827,11 @@ def draw_menu(scr, config, wallet_configs, action=None):
         except ValueError:
             kstr = "???"
 
-        statusbarstr = f"press 'q' to exit | never sell | last keypress: {kstr} ({k})"
+        walletname = wallet_configs[0].name if wallet_configs else ""
+        statusbarstr = (
+            f"press 'q' to exit | {walletname} | never sell | "
+            f"last keypress: {kstr} ({k})"
+        )
         if k == -1:
             statusbarstr += " | waiting"
 
@@ -2020,6 +2061,14 @@ def watch():
 
 
 @cli.cmd
+def scanargs():
+    """Print the bitcoin-cli scanblocks command associated with this wallet."""
+    (config, (wall, *_)) = _get_config_required()
+    args =  ' '.join(f"'{json.dumps(i)}'" for i in wall.scantxoutset_args())
+    print(f"bitcoin-cli scanblocks {args}")
+
+
+@cli.cmd
 def balance(format: str = "plain"):
     """
     Check your wallet balances.
@@ -2055,9 +2104,83 @@ def balance(format: str = "plain"):
         print(bold(f"total: {len(utxos)} ({amt} BTC)"))
 
 
+def _select_coins_ui(utxos: list['UTXO']) -> list['UTXO']:
+    selected: set[int] = set()
+
+    print()
+    F.task("select the coins you want to operate on:")
+    print()
+
+    while True:
+        print()
+        total = Decimal()
+        for i, u in enumerate(utxos):
+            sel = "(*)" if i in selected else "( )"
+            print(f"  {sel} {i}: {u.address} - {u.amount}")
+            if i in selected:
+                total += u.amount
+
+        print()
+        print(f"total selected: {float(total)} BTC")
+        print()
+        inp = input("select/deslect by idx (e.g. 0,3,4) | 'q' to finish > ").strip()
+
+        if not inp:
+            continue
+
+        if inp.lower() == 'q':
+            break
+
+        selected = selected ^ set([int(idx.strip()) for idx in inp.split(",")])
+
+    return [u for i, u in enumerate(utxos) if i in selected]
+
+
+@cli.cmd
+def consolidate():
+    """
+    Consolidate certain coins within your wallet to a single UTXO.
+
+    Coin selection is performed interactively.
+    """
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+    result = rpcw.listunspent(0)
+    utxos = UTXO.from_listunspent(result)
+    utxos = _select_coins_ui(utxos)
+
+    print("Consolidating")
+    for u in utxos:
+        print(f"- {u}")
+    print()
+
+    prefee_total = sum([Decimal(u.amount) for u in utxos])
+
+    # Conslidation destination
+    addr = rpcw.getnewaddress()
+
+    psbt_args = (
+        [{'txid': u.txid, 'vout': u.vout} for u in utxos], 
+        {addr: float(prefee_total)}, 
+        0, 
+        {'subtractFeeFromOutputs': [0]},
+    )
+    res = rpcw.walletcreatefundedpsbt(*psbt_args)
+    if res['changepos'] != -1:
+        F.warn("unexpected change structure for consolidation txn")
+        return 1
+
+    target_total = prefee_total - res['fee']
+
+    F.done(
+        f"Consolidating {float(prefee_total)} BTC to address {addr} "
+        f"({float(target_total)} BTC after fees of {float(res['fee'])} BTC)")
+    _confirm_tx_result(rpcw, res)
+
+
 @cli.cmd
 def prepare_send(
-    to_address: str, amount: str, spend_from: str = "", fee_rate: int = None
+    to_address: str, amount: str, spend_from: str = "", fee_rate: int | None = None
 ):
     """
     Prepare a sending PSBT.
@@ -2073,6 +2196,15 @@ def prepare_send(
     spend_from_list = spend_from.split(",") if spend_from else None
 
     return _prepare_send(rpcw, to_address, amount, spend_from_list, fee_rate=fee_rate)
+
+
+@cli.cmd
+def sendall(to_address: str, fee_rate: int | None = None):
+    (config, (wall, *_)) = _get_config_required()
+    rpcw = config.rpc(wall)
+
+    return _prepare_send(rpcw, to_address, 'all', fee_rate=fee_rate)
+
 
 
 @cli.cmd
@@ -2111,6 +2243,7 @@ def newaddr(num: int = 1, clip: ClipArg = False):  # type: ignore
     for _ in range(num):
         addr = rpcw.getnewaddress()
         print(addr)
+        print_qr(addr)
 
     if clip and addr:
         to_clipboard(addr)
@@ -2154,11 +2287,13 @@ def init_wallet_in_core(config, rpc, wallet) -> BitcoinRPC:
 
     rpcw = config.rpc(wallet)
     try:
-        rpcw.importmulti(*wallet.importmulti_args())
+        rpcw.importdescriptors(*wallet.importdescriptor_args())
+        F.done("imported wallet with `importdescriptors`")
     except JSONRPCError:
         # Could be a descriptor wallet, try that.
         # TODO: make descriptor wallet status a first class piece of metadata.
-        rpcw.importdescriptors(*wallet.importmulti_args())
+        rpcw.importmulti(*wallet.importmulti_args())
+        F.done("imported wallet with `importmulti`")
 
     F.done("imported descriptors 0/* and 1/* (change)")
 
@@ -2259,10 +2394,6 @@ class Wallet:
     loaded_from: Op[str] = None
 
     @property
-    def descriptor_base(self):
-        return f"wpkh([{self.fingerprint}{self.deriv_path}]{self.xpub})"
-
-    @property
     def net_name(self):
         if self.xpub.startswith("tpub"):
             return TESTNET
@@ -2285,6 +2416,24 @@ class Wallet:
                 "timestamp": "now",
                 "keypool": True,
                 "watchonly": True,
+            }
+            for d in self.descriptors
+        ]
+
+        return (args,)
+
+    def importdescriptor_args(self) -> t.Tuple:
+        args = [
+            {
+                "desc": d.with_checksum,
+                "internal": d.is_change,
+                # TODO be more decisive about this gap limit. Right now it's sort of
+                # arbitrary.
+                "range": [0, 3000],
+                "timestamp": "now",
+                "keypool": True,
+                "watchonly": True,
+                "active": False if d.is_change else True,
             }
             for d in self.descriptors
         ]
@@ -2359,6 +2508,7 @@ class Wallet:
                 deriv_path,
                 xpub,
                 is_change=is_change,
+                # TODO: document the BIP-84 assumption.
                 checksum=checksum_map["1" if is_change else "0"],
             )
             for is_change in [False, True]
@@ -2472,6 +2622,70 @@ class CCWallet(Wallet):
             earliest_block=earliest_block,
         )
 
+    @classmethod
+    def from_json(
+        cls,
+        jdict: dict,
+        rpc: BitcoinRPC,
+        name: Op[str] = None,
+        earliest_block: Op[int] = None,
+    ) -> "CCWallet":
+        """
+        Instantiate a CCWallet from the public output generated by the
+        coldcard Q "Generic JSON" export.
+        """
+        # This is the master xpub fingerprint, not the BIP84 derivation's xfp.
+        fp = jdict['xfp']
+
+        name = name or f"coldcard-{fp}"
+        deriv_path = jdict['bip84']['deriv'].lstrip('m')
+
+        # CAREFUL! In this same json structurue, there is a "top-level" xpub key. Do 
+        # not use this, or you will get "Change fraud" errors during attempted spends 
+        # on the coldcard.
+        xpub = jdict['bip84']['xpub']
+
+        # E.g. "wpkh([71175383/84h/0h/0h]xpub6BgCxiTNHZaXF[...]/<0;1>/*)#cja426m7"
+        combined_desc = jdict['bip84']['desc']
+
+        def desc_to_checksum(desc: WpkhDescriptor) -> str:
+            try:
+                # TODO this isn't available in 0.18
+                return rpc.getdescriptorinfo(desc.base)["checksum"]
+            except JSONRPCError:
+                F.warn("Please upgrade Bitcoin Core to a version greater than 0.19")
+                raise
+
+        descs = []
+        for is_change in [False, True]:
+            desc = WpkhDescriptor.from_conf(
+                fp, deriv_path, xpub, is_change=is_change, checksum=""
+            )
+
+            # Verify that we constructed the change-specific descriptor in accordance
+            # with what coldcard gave us.
+            expected_desc = re.sub('<0;1>', '1' if is_change else '0', combined_desc)
+            expected_desc = expected_desc.split('#')[0]
+
+            if desc.base != expected_desc:
+                F.warn(
+                    f"Improperly computed descriptor: expected '{expected_desc}', "
+                    f"got '{desc.base}'")
+                raise RuntimeError()
+
+            desc.checksum = desc_to_checksum(desc)
+            descs.append(desc)
+
+        return cls(
+            name,
+            fp,
+            deriv_path,
+            xpub,
+            f"coldcard-{fp.lower()}",
+            descriptors=descs,
+            earliest_block=earliest_block,
+        )
+
 
 @dataclass
 class WpkhDescriptor:
@@ -2551,6 +2765,8 @@ class GlobalConfig:
     def rpc(self, wallet: Op[Wallet] = None, **kwargs) -> BitcoinRPC:
         wall_rpc = wallet.bitcoind_json_url if wallet else None
 
+        # TODO: if we haven't opened bitcoind/wallet in a little while, this will
+        # throw a TimeoutError while the wallet rescans.
         return get_rpc(
             # The ordering of RPC preference is important here.
             cli.args.rpc or wall_rpc or self.bitcoind_json_url,
@@ -2695,6 +2911,7 @@ def _is_already_loaded_err(e: JSONRPCError) -> bool:
         (e.code in [-4, -35] and "already loaded" in msg)
         or ("wallet file" in msg and "is already loaded" in msg)
         or "duplicate -wallet filename" in msg
+        or "unable to obtain an exclusive lock" in msg
         or "database already exists" in msg
     )
 
@@ -2876,14 +3093,19 @@ def get_utxos(rpcw: BitcoinRPC) -> t.Dict[UtxoId, "UTXO"]:
 def _prepare_send(
     rpcw: BitcoinRPC,
     to_address: str,
-    amount: str,
-    spend_from: Op[t.List[str]],
+    amount: float | str,
+    spend_from: Op[t.List[str]] = None,
     fee_rate: Op[int] = None,
+    prompt_show_qr: bool = True,
 ) -> str:
     """
     fee_rate: specified in sats/vB
     """
     vins = []
+    spendall = amount == 'all'
+
+    if spendall and spend_from:
+        raise ValueError("can't specify UTXOs when spending all")
 
     if spend_from:
         utxos = UTXO.from_listunspent(rpcw.listunspent(0))
@@ -2898,25 +3120,43 @@ def _prepare_send(
             if u.address in spend_from:
                 vins.append({"txid": u.txid, "vout": u.vout})
 
-    args: t.Dict[str, t.Any] = {"includeWatching": True}
+    args: t.Dict[str, t.Any] = {
+        "includeWatching": True,
+        "change_type": 'bech32',
+    }
     if fee_rate is not None:
         args["fee_rate"] = fee_rate
 
-    try:
-        result = rpcw.walletcreatefundedpsbt(
-            vins,  # inputs for txn (manual coin control)
-            [{to_address: amount}],
-            0,  # locktime
-            args,  # options; 'feeRate'?
-            True,  # bip32derivs - include BIP32 derivation paths for pubkeys if known
-        )
-    except Exception as e:
-        # error code: -5 indicates bad address; handle that.
-        if e.error.get("code") == -5:  # type: ignore
-            F.warn(f"Bad address specified: {e}")
-            return ""
-        raise
+    if not spendall:
+        try:
+            result = rpcw.walletcreatefundedpsbt(
+                vins,  # inputs for txn (manual coin control)
+                [{to_address: amount}],
+                0,  # locktime
+                args,  # options; 'feeRate'?
+                # bip32derivs - include BIP32 derivation paths for pubkeys if known
+                True,  
+            )
+        except Exception as e:
+            # error code: -5 indicates bad address; handle that.
+            if e.error.get("code") == -5:  # type: ignore
+                F.warn(f"Bad address specified: {e}")
+                return ""
+            raise
+    else:
+        try:
+            result = rpcw.sendall([to_address])
+        except Exception as e:
+            # error code: -5 indicates bad address; handle that.
+            if e.error.get("code") == -5:  # type: ignore
+                F.warn(f"Bad address specified: {e}")
+                return ""
+            raise
 
+    return _confirm_tx_result(rpcw, result, prompt_show_qr=prompt_show_qr)
+
+
+def _confirm_tx_result(rpcw, result: dict, prompt_show_qr: bool = True):
     nowstr = datetime.datetime.now().strftime("%Y%m%d-%H%M")
     filename = f"unsigned-{nowstr}.psbt"
     Path(filename).write_bytes(base64.b64decode(result["psbt"]))
@@ -2954,11 +3194,11 @@ def _prepare_send(
             change = change + amt
 
     fee = result["fee"]
-    perc = (fee / Decimal(amount)) * 100
+    perc = (fee / Decimal(total_out_amt)) * 100
 
     F.info(f"total output amount: {total_out_amt} BTC")
     F.info(f"{num_inputs} inputs, {num_outputs} outputs")
-    F.info(f"network fee: {result['fee']} BTC ({perc:.2f}% of amount)")
+    F.info(f"network fee: {fee} BTC ({perc:.2f}% of output amount)")
     F.info(f"change back: {change} BTC")
     F.info("outputs:")
 
@@ -2977,6 +3217,9 @@ def _prepare_send(
 
     F.p()
     F.done(f"wrote PSBT to {filename} - sign with coldcard")
+
+    if prompt_show_qr:
+        print_qr(result['psbt'], prompt=True)
 
     return filename
 

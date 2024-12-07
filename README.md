@@ -49,7 +49,7 @@ Coldcard, and not much else.
     help
 - Bitcoin Core 0.19+
 - Python 3.7+ (your system probably already has this)
-- Coldcard
+- Coldcard (original or Q)
 
 ![home](docs/img/splash.png)
 
@@ -61,6 +61,7 @@ Not super familiar with the commandline? On macOS? Check out the [easy setup tut
 
 1. Buy a [Coldcard](https://coldcardwallet.com)
 1. Download, install, and sync [Bitcoin Core](https://bitcoincore.org/en/download/)
+    - If possible, sync with `-blockfilterindex=1` for much faster wallet scanning.
 1. Ensure Python 3.7+ is on your system: `$ python3 --version` and if not, install it.
     - macOS: install [homebrew](https://brew.sh/), run `brew install python3`
     - [Linux](https://realpython.com/installing-python)
@@ -69,6 +70,10 @@ Not super familiar with the commandline? On macOS? Check out the [easy setup tut
     - `cp coldcore ~/.local/bin/coldcore  # or somewhere on your PATH`
 1. Boot 'er up
     - `coldcore`
+
+If you have the `qrencode` binary installed on your system (e.g. `apt install
+qrencode`), certain data will be shown with accompanying QRs. This can make it easier
+to communicate to airgapped devices which read QRs, like the Coldcard Q.
 
 ### Verifying the install (optional but recommended)
 

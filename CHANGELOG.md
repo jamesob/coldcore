@@ -1,3 +1,13 @@
+
+## 0.4.1
+
+- Added Coldcard Q support
+- Fixed descriptor wallet import (setting active=true)
+- Added QR printing
+- Added `consolidate` CLI command
+- Added coin selection interface for `consolidate`
+- Change address type specified as bech32 upon wallet creation
+
 ## 0.3.1
 
 - Wayland clipboard support (via wl-copy)

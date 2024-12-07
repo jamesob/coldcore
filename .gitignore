@@ -2,6 +2,7 @@
 
 public.txt
 *.psbt
+*.txn
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
