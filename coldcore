@@ -2180,7 +2180,7 @@ def consolidate():
 
 @cli.cmd
 def prepare_send(
-    to_address: str, amount: str, spend_from: str = "", fee_rate: int | None = None
+    to_address: str, amount: str, spend_from: str = "", fee_rate: t.Optional[int] = None
 ):
     """
     Prepare a sending PSBT.
@@ -2199,7 +2199,7 @@ def prepare_send(
 
 
 @cli.cmd
-def sendall(to_address: str, fee_rate: int | None = None):
+def sendall(to_address: str, fee_rate: t.Optional[int] = None):
     (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
 
