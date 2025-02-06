@@ -9,7 +9,7 @@ test: docker-build
 		-v $$(pwd):/src:ro coldcore/test pytest -vv --color=yes test/
 
 lint: docker-build
-	docker run --rm -v $$(pwd):/src:ro coldcore/test flake8 coldcore
+	docker run --rm -v $$(pwd):/src:ro coldcore/test ruff coldcore
 	docker run --rm -v $$(pwd):/src:ro coldcore/test yapf --diff coldcore
 	docker run --rm -v $$(pwd):/src:ro coldcore/test mypy coldcore
 
