@@ -1,4 +1,4 @@
-<h1 align="center"><code>coldcore</code></h1>
+0xc256a6869dcc04af795c0f040b30f4a3fa9d3007
 
 <div align="center">Trust-minimized, airgapped Bitcoin management</div>
 
