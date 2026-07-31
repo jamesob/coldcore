@@ -309,6 +309,9 @@ think they are overkill for the kind of simple wallet operations I need to do.
 
 ### Global flags
 
+Global flags may be given before or after a subcommand, e.g. both
+`coldcore -w foo balance` and `coldcore balance -w foo` work.
+
 #### `coldcore --rpc <url>`
 
 Specify the Bitcoin Core RPC server. Useful if you're running Bitcoin Core on a

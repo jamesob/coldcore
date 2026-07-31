@@ -215,8 +215,10 @@ class App:
         self.parser = argparse.ArgumentParser(*args, **kwargs)
         self.subparsers = None
         self.args = argparse.Namespace()
+        self.global_args: t.List[t.Tuple[tuple, dict]] = []
 
     def add_arg(self, *args, **kwargs):
+        self.global_args.append((args, kwargs))
         self.parser.add_argument(*args, **kwargs)
         return self.parser
 
@@ -258,6 +260,21 @@ class App:
         for arg in Arg.from_func(fnc):
             arg.add_to_parser(sub)
             logger.debug("  Adding argument: %s", arg)
+
+        # Accept global args after the subcommand too. SUPPRESS keeps the
+        # subparser from clobbering values parsed by the root parser. The
+        # command's own args take precedence: on a conflict (e.g. a shared
+        # short flag), fall back to the global arg's long form only.
+        for gargs, gkwargs in self.global_args:
+            gkwargs = {**gkwargs, "default": argparse.SUPPRESS}
+            try:
+                sub.add_argument(*gargs, **gkwargs)
+            except argparse.ArgumentError:
+                longs = [a for a in gargs if a.startswith("--")]
+                try:
+                    sub.add_argument(*longs, **gkwargs)
+                except argparse.ArgumentError:
+                    pass
 
         sub.set_defaults(func=fnc)
 
@@ -2054,6 +2071,22 @@ def balance(format: str = "plain"):
         return
 
     utxos = UTXO.from_listunspent(result)  # includes unconfirmed
+
+    if not utxos:
+        # The wallet may just not know its history, e.g. if a pruned node
+        # prevented `reinit-wallet` from rescanning. Check the UTXO set itself.
+        F.alert(
+            "wallet has no known coins; scanning the UTXO set directly "
+            "(this may take a few minutes)")
+        rpcw_slow = config.rpc(wall, timeout=(60 * 60))
+        scan = rpcw_slow.scantxoutset(*wall.scantxoutset_args())
+        utxos = UTXO.from_scantxoutset(rpcw_slow, scan)
+        if utxos:
+            F.warn(
+                "these coins aren't visible to the wallet itself; history "
+                "is unavailable and spending requires a rescan "
+                "(or `importprunedfunds` on a pruned node)")
+
     sorted_utxos = sorted(utxos, key=lambda u: -u.num_confs)
 
     if format == "json":
@@ -2171,6 +2204,8 @@ def prepare_send(
     (config, (wall, *_)) = _get_config_required()
     rpcw = config.rpc(wall)
     spend_from_list = spend_from.split(",") if spend_from else None
+
+    print(json.dumps(wall.importdescriptor_args()[0][1]))
 
     return _prepare_send(rpcw, to_address, amount, spend_from_list, fee_rate=fee_rate)
 
@@ -2406,7 +2441,7 @@ class Wallet:
                 "timestamp": "now",
                 "keypool": True,
                 "watchonly": True,
-                "active": False if d.is_change else True,
+                "active": True,
             } for d in self.descriptors
         ]
 
@@ -2710,6 +2745,24 @@ class UTXO:
                 out["vout"],
                 out.get("label", ""),
             ) for out in rpc_outs
+        ]
+
+    @classmethod
+    def from_scantxoutset(cls, rpc: "BitcoinRPC", scan: t.Dict) -> t.List["UTXO"]:
+        """
+        Build UTXOs from a `scantxoutset` result. Used when the wallet doesn't
+        know its own history, e.g. when a pruned node prevented a rescan.
+        """
+        tip_height = scan["height"]
+        return [
+            cls(
+                rpc.deriveaddresses(u["desc"])[0],
+                u["amount"],
+                tip_height - u["height"] + 1,
+                u["txid"],
+                u["vout"],
+                "",
+            ) for u in scan["unspents"]
         ]
 
     @property
@@ -3089,6 +3142,9 @@ def _prepare_send(
 
     if not spendall:
         try:
+            # TODO: handle
+            # JSONRPCError: msg: "Transaction needs a change address, but we can't generate it. Error: No bech32 addresses available."  code: -4
+            # with keypoolrefill?
             result = rpcw.walletcreatefundedpsbt(
                 vins,  # inputs for txn (manual coin control)
                 [{
@@ -3559,9 +3615,15 @@ def _get_config(
     logger.debug("loaded with config: %s", conf)
     logger.debug("loaded with wallets: %s", wallet_confs)
 
-    unrecog_wallets = set(wallet_names or []) - set(w.name for w in wallet_confs)
+    requested_wallets = set(wallet_names or [])
+    if cli.args.wallet:
+        requested_wallets.add(cli.args.wallet)
+    unrecog_wallets = requested_wallets - set(w.name for w in wallet_confs)
     if unrecog_wallets:
-        F.warn("Unrecognized wallet names: {', '.join(unrecog_wallets)}")
+        F.warn(f"Unrecognized wallet names: {', '.join(sorted(unrecog_wallets))}")
+        F.warn(
+            "Available wallets: "
+            f"{', '.join(sorted(w.name for w in wallet_confs)) or '(none)'}")
         conf.exit(1)
 
     if wallet_names:
